@@ -36,5 +36,5 @@ subdir-y += xilinx
 subdir-y += zte
 
 else
-    subdir-y += vendor
+	subdir-y += vendor
 endif

@@ -31,7 +31,7 @@ struct oplus_chg_module __name##_module = {			\
 #else /* MODULE */
 
 #define oplus_chg_module_register(__name)	\
-	late_initcall(__name##_init);		\
+	module_init(__name##_init);		\
 	module_exit(__name##_exit)
 
 #endif /* MODULE */
