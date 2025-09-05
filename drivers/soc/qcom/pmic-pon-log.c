@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2020-2021, The Linux Foundation. All rights reserved. */
-/* Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved. */
+/* Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved. */
 
 #include <linux/err.h>
 #include <linux/ipc_logging.h>
@@ -174,20 +174,10 @@ static const struct pmic_pon_trigger_mapping pmic_pon_pon_trigger_map[] = {
 	{0x0085, "HARD_RESET"},
 	{0x0086, "RESIN_N"},
 	{0x0087, "KPDPWR_N"},
-	/* PM5100 USB PON trigger */
-	{0x0202, "USB_CHARGER"},
 	{0x0621, "RTC_ALARM"},
 	{0x0640, "SMPL"},
-	/* PMX75 USB PON trigger */
-	{0x18A0, "USB_CHARGER"},
 	{0x18C0, "PMIC_SID1_GPIO5"},
-	/* PMI632 USB PON trigger */
-	{0x2763, "USB_CHARGER"},
-	/* PM8350B USB PON trigger */
 	{0x31C2, "USB_CHARGER"},
-	/* PM8550B USB PON trigger */
-	/* PM7550BA USB PON trigger */
-	{0x71C2, "USB_CHARGER"},
 	/* PM7250B USB PON trigger */
 	{0x8732, "USB_CHARGER"},
 };
@@ -557,7 +547,6 @@ static int pmic_pon_log_parse(struct pmic_pon_log_dev *pon_dev)
 	return 0;
 }
 
-#define FAULT_REASON2_FAULT_N_MASK			BIT(3)
 #define FAULT_REASON2_RESTART_PON_MASK			BIT(6)
 
 /* Trigger a kernel panic if the last power off was caused by a PMIC fault. */
@@ -567,12 +556,10 @@ static void pmic_pon_log_fault_panic(struct pmic_pon_log_dev *pon_dev)
 	int prev_pon_success = 0;
 	int warm_reset_skip_count = 0;
 	bool pon_success_found = false;
+	u8 mask = (u8)~FAULT_REASON2_RESTART_PON_MASK;
 	char buf[BUF_SIZE];
-	u8 mask;
 	int i;
 
-	mask = (u8)~(FAULT_REASON2_RESTART_PON_MASK |
-		     FAULT_REASON2_FAULT_N_MASK);
 	/*
 	 * Iterate over log events from newest to oldest.  Find the most recent
 	 * and second most recent PON success events.  Ignore PON success events

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2002,2007-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #ifndef __KGSL_DEVICE_H
 #define __KGSL_DEVICE_H
@@ -170,8 +170,6 @@ struct kgsl_functable {
 		struct kgsl_context *context);
 	/** @create_hw_fence: Create a hardware fence */
 	void (*create_hw_fence)(struct kgsl_device *device, struct kgsl_sync_fence *kfence);
-	/** @register_gdsc_notifier: Target specific function to register gdsc notifier */
-	int (*register_gdsc_notifier)(struct kgsl_device *device);
 };
 
 struct kgsl_ioctl {
@@ -280,7 +278,6 @@ struct kgsl_device {
 	struct kgsl_pwrscale pwrscale;
 
 	int reset_counter; /* Track how many GPU core resets have occurred */
-	struct workqueue_struct *events_wq;
 
 	/* Number of active contexts seen globally for this device */
 	int active_context_count;
@@ -313,6 +310,13 @@ struct kgsl_device {
 	spinlock_t timelines_lock;
 	/** @fence_trace_array: A local trace array for fence debugging */
 	struct trace_array *fence_trace_array;
+
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2021/07/26, add for oplus gpu mini dump
+	bool snapshot_control;
+	int snapshotfault;
+#endif
+
 	/** @l3_vote: Enable/Disable l3 voting */
 	bool l3_vote;
 	/** @pdev_loaded: Flag to test if platform driver is probed */
@@ -325,23 +329,6 @@ struct kgsl_device {
 	int freq_limiter_intr_num;
 	/** @bcl_data_kobj: Kobj for bcl_data sysfs node */
 	struct kobject bcl_data_kobj;
-	/** @idle_jiffies: Latest idle jiffies */
-	unsigned long idle_jiffies;
-
-	/** @work_period_timer: Timer to capture application GPU work stats */
-	struct timer_list work_period_timer;
-	/** work_period_lock: Lock to protect process application GPU work periods */
-	spinlock_t work_period_lock;
-	/** work_period_ws: Worker thread to emulate application GPU work event */
-	struct work_struct work_period_ws;
-	/** @flags: Flags for gpu_period stats */
-	unsigned long flags;
-	struct {
-		u64 begin;
-		u64 end;
-	} gpu_period;
-	/** @dump_all_ibs: Whether to dump all ibs in snapshot */
-	bool dump_all_ibs;
 };
 
 #define KGSL_MMU_DEVICE(_mmu) \
@@ -519,8 +506,6 @@ struct kgsl_process_private {
 	 * @reclaim_lock: Mutex lock to protect KGSL_PROC_PINNED_STATE
 	 */
 	struct mutex reclaim_lock;
-	/** @period: Stats for GPU utilization */
-	struct gpu_work_period *period;
 	/**
 	 * @cmd_count: The number of cmds that are active for the process
 	 */
@@ -599,6 +584,10 @@ struct kgsl_snapshot {
 	bool first_read;
 	bool recovered;
 	struct kgsl_device *device;
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2021/07/26, add for oplus gpu mini dump
+	char snapshot_hashid[96];
+#endif
 };
 
 /**
@@ -626,18 +615,6 @@ static inline void kgsl_regread(struct kgsl_device *device,
 				unsigned int *value)
 {
 	*value = kgsl_regmap_read(&device->regmap, offsetwords);
-}
-
-static inline void kgsl_regread64(struct kgsl_device *device,
-				u32 offsetwords_lo, u32 offsetwords_hi,
-				u64 *value)
-{
-	u32 val_lo = 0, val_hi = 0;
-
-	val_lo = kgsl_regmap_read(&device->regmap, offsetwords_lo);
-	val_hi = kgsl_regmap_read(&device->regmap, offsetwords_hi);
-
-	*value = (((u64)val_hi << 32) | val_lo);
 }
 
 static inline void kgsl_regwrite(struct kgsl_device *device,
@@ -674,8 +651,8 @@ static inline bool kgsl_state_is_nap_or_minbw(struct kgsl_device *device)
  */
 static inline void kgsl_start_idle_timer(struct kgsl_device *device)
 {
-	device->idle_jiffies = jiffies + msecs_to_jiffies(device->pwrctrl.interval_timeout);
-	mod_timer(&device->idle_timer, device->idle_jiffies);
+	mod_timer(&device->idle_timer,
+			jiffies + msecs_to_jiffies(device->pwrctrl.interval_timeout));
 }
 
 int kgsl_readtimestamp(struct kgsl_device *device, void *priv,
@@ -964,6 +941,29 @@ void kgsl_process_private_put(struct kgsl_process_private *private);
 
 
 struct kgsl_process_private *kgsl_process_private_find(pid_t pid);
+
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2020/04/06, add for oplus gpu mini dump
+/**
+ * kgsl_sysfs_store() - parse a string from a sysfs store function
+ * @buf: Incoming string to parse
+ * @ptr: Pointer to an unsigned int to store the value
+ */
+static inline int kgsl_sysfs_store(const char *buf, unsigned int *ptr)
+{
+	unsigned int val;
+	int rc;
+
+	rc = kstrtou32(buf, 0, &val);
+	if (rc)
+		return rc;
+
+	if (ptr)
+		*ptr = val;
+
+	return 0;
+}
+#endif
 
 /*
  * A helper macro to print out "not enough memory functions" - this

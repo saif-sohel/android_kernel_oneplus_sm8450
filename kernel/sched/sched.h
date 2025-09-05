@@ -89,6 +89,8 @@
 struct rq;
 struct cpuidle_state;
 
+extern unsigned long stop_fair_group;
+
 /* task_struct::on_rq states: */
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
@@ -1078,6 +1080,7 @@ struct rq {
 #endif
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 96);
+	/* Please add your member in struct oplus_rq */
 	ANDROID_OEM_DATA_ARRAY(1, 16);
 
 	ANDROID_KABI_RESERVE(1);

@@ -333,7 +333,7 @@ static void drawobj_sync_timeline_fence_callback(struct dma_fence *f,
 	 * removing the fence
 	 */
 	if (drawobj_sync_expire(event->device, event))
-		queue_work(kgsl_driver.lockless_workqueue, &event->work);
+		queue_work(kgsl_driver.mem_workqueue, &event->work);
 }
 
 static void syncobj_destroy(struct kgsl_drawobj *drawobj)
@@ -437,10 +437,8 @@ static void cmdobj_destroy(struct kgsl_drawobj *drawobj)
 		kmem_cache_free(memobjs_cache, mem);
 	}
 
-	if (drawobj->type & CMDOBJ_TYPE) {
+	if (drawobj->type & CMDOBJ_TYPE)
 		atomic_dec(&drawobj->context->proc_priv->cmd_count);
-		atomic_dec(&drawobj->context->proc_priv->period->active_cmds);
-	}
 }
 
 /**
@@ -571,7 +569,6 @@ static int drawobj_add_sync_timeline(struct kgsl_device *device,
 			dma_fence_put(event->fence);
 			ret = 0;
 		}
-
 		/* Put the refcount from fence creation */
 		dma_fence_put(event->fence);
 		kgsl_drawobj_put(drawobj);
@@ -753,9 +750,6 @@ int kgsl_drawobj_sync_add_sync(struct kgsl_device *device,
 	struct kgsl_cmd_syncpoint *sync)
 {
 	struct kgsl_drawobj *drawobj = DRAWOBJ(syncobj);
-
-	if (sync->type != KGSL_CMD_SYNCPOINT_TYPE_FENCE)
-		syncobj->flags |= KGSL_SYNCOBJ_SW;
 
 	if (sync->type == KGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP)
 		return drawobj_add_sync_timestamp_from_user(device,
@@ -1155,23 +1149,8 @@ struct kgsl_drawobj_cmd *kgsl_drawobj_cmd_create(struct kgsl_device *device,
 	INIT_LIST_HEAD(&cmdobj->memlist);
 	cmdobj->requeue_cnt = 0;
 
-	if (!(type & CMDOBJ_TYPE))
-		return cmdobj;
-
-	atomic_inc(&context->proc_priv->cmd_count);
-	atomic_inc(&context->proc_priv->period->active_cmds);
-	spin_lock(&device->work_period_lock);
-	if (!__test_and_set_bit(KGSL_WORK_PERIOD, &device->flags)) {
-		mod_timer(&device->work_period_timer,
-			  jiffies + msecs_to_jiffies(KGSL_WORK_PERIOD_MS));
-		device->gpu_period.begin = ktime_get_ns();
-	}
-
-	/* Take a refcount here and put it back in kgsl_work_period_timer() */
-	if (!__test_and_set_bit(KGSL_WORK_PERIOD, &context->proc_priv->period->flags))
-		kref_get(&context->proc_priv->period->refcount);
-
-	spin_unlock(&device->work_period_lock);
+	if (type & CMDOBJ_TYPE)
+		atomic_inc(&context->proc_priv->cmd_count);
 
 	return cmdobj;
 }

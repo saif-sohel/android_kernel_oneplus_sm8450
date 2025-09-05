@@ -2,8 +2,6 @@
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
  *
- * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
- *
  * Took is_el1_instruction_abort() from arch/arm64/mm/fault.c
  * Copyright (C) 2012 ARM Ltd
  */
@@ -22,6 +20,7 @@
 
 static unsigned long panic_on_oom_timeout;
 struct task_struct *saved_tsk;
+
 
 #define PANIC_ON_OOM_DEFER_TIMEOUT (5*HZ)
 
@@ -47,12 +46,12 @@ static void set_swap_cache(void *data, gfp_t *flag)
 	*flag |= __GFP_CMA;
 }
 
-static void reap_eligible(void *data, struct task_struct *task, bool *reap)
-{
-	/* TODO: Can this logic be moved to module params approach? */
-	if (!strcmp(task->comm, "lmkd") || !strcmp(task->comm, "PreKillActionT"))
-		*reap = true;
-}
+//static void reap_eligible(void *data, struct task_struct *task, bool *reap)
+//{
+//	/* TODO: Can this logic be moved to module params approach? */
+//	if (!strcmp(task->comm, "lmkd") || !strcmp(task->comm, "athena_killer") || !strcmp(task->comm, "PreKillActionT"))
+//		*reap = true;
+//}
 
 static void __oom_panic_defer(void *data, struct oom_control *oc, int *val)
 {
@@ -86,7 +85,22 @@ out:
 
 static void balance_reclaim(void *unused, bool *balance_anon_file_reclaim)
 {
-	*balance_anon_file_reclaim = true;
+	pg_data_t *pgdat;
+	struct zone *zone;
+	unsigned long free_pages_threshold = 0;
+	unsigned long normal_zone_free_pages = 0;
+
+	pgdat = NODE_DATA(0);
+	zone = &pgdat->node_zones[ZONE_NORMAL];
+	free_pages_threshold = low_wmark_pages(zone) + ((high_wmark_pages(zone)-low_wmark_pages(zone)) >> 1);
+
+	/*we do not balance reclaim anon and page cache files for reclaim when free < low + (high - low)/2;*/
+	normal_zone_free_pages = zone_page_state(zone, NR_FREE_PAGES);
+	if(normal_zone_free_pages <  free_pages_threshold) {
+		*balance_anon_file_reclaim = false;
+	} else {
+		*balance_anon_file_reclaim = true;
+	}
 }
 
 static void allow_subpage_alloc(void *data, bool *allow_subpage_alloc, struct device *dev,
@@ -114,7 +128,7 @@ static bool is_el1_instruction_abort(unsigned long esr)
 }
 
 static void can_fixup_sea(void *unused, unsigned long addr, unsigned long esr,
-			  struct pt_regs *regs, bool *can_fixup)
+						struct pt_regs *regs, bool *can_fixup)
 {
 	if (!user_mode(regs) && !is_el1_instruction_abort(esr))
 		*can_fixup = true;
@@ -144,11 +158,11 @@ static int __init init_mem_hooks(void)
 		return ret;
 	}
 
-	ret = register_trace_android_vh_process_killed(reap_eligible, NULL);
-	if (ret) {
-		pr_err("Failed to register process_killed hooks\n");
-		return ret;
-	}
+	//ret = register_trace_android_vh_process_killed(reap_eligible, NULL);
+	//if (ret) {
+	//	pr_err("Failed to register process_killed hooks\n");
+	//	return ret;
+	//}
 
 	ret = register_trace_android_vh_oom_check_panic(__oom_panic_defer,
 							NULL);
@@ -172,7 +186,6 @@ static int __init init_mem_hooks(void)
 		return ret;
 	}
 
-
 	ret = register_trace_android_vh_try_fixup_sea(can_fixup_sea, NULL);
 	if (ret) {
 		pr_err("Failed to register try_fixup_sea\n");
@@ -182,7 +195,14 @@ static int __init init_mem_hooks(void)
 	return 0;
 }
 
+void exit_mem_hooks(void)
+{
+	unregister_trace_android_vh_oom_check_panic(
+			__oom_panic_defer, NULL);
+}
+
 module_init(init_mem_hooks);
+module_exit(exit_mem_hooks);
 
 MODULE_DESCRIPTION("Qualcomm Technologies, Inc. Memory Trace Hook Call-Back Registration");
 MODULE_LICENSE("GPL v2");

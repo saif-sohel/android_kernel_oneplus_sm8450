@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #define pr_fmt(fmt)	"eusb2_phy: %s: " fmt, __func__
@@ -227,19 +227,11 @@ static void msm_eusb2_phy_clocks(struct msm_eusb2_phy *phy, bool on)
 
 static void msm_eusb2_phy_update_eud_detect(struct msm_eusb2_phy *phy, bool set)
 {
-	if (!phy->eud_detect_reg)
-		return;
-
-	if (set) {
-		/* Make sure all the writes are processed before setting EUD_DETECT */
-		mb();
+	if (set)
 		writel_relaxed(EUD_DETECT, phy->eud_detect_reg);
-	} else {
+	else
 		writel_relaxed(readl_relaxed(phy->eud_detect_reg) & ~EUD_DETECT,
 					phy->eud_detect_reg);
-		/* Make sure clearing EUD_DETECT is completed before turning off the regulators */
-		mb();
-	}
 }
 
 static int msm_eusb2_phy_power(struct msm_eusb2_phy *phy, bool on)
@@ -296,6 +288,8 @@ static int msm_eusb2_phy_power(struct msm_eusb2_phy *phy, bool on)
 		goto unset_vdda12;
 	}
 
+	/* Make sure all the writes are processed before setting EUD_DETECT */
+	mb();
 	/* Set eud_detect_reg after powering on eUSB PHY rails to bring EUD out of reset */
 	msm_eusb2_phy_update_eud_detect(phy, true);
 
@@ -306,6 +300,9 @@ static int msm_eusb2_phy_power(struct msm_eusb2_phy *phy, bool on)
 clear_eud_det:
 	/* Clear eud_detect_reg to put EUD in reset */
 	msm_eusb2_phy_update_eud_detect(phy, false);
+
+	/* Make sure clearing EUD_DETECT is completed before turning off the regulators */
+	mb();
 
 	ret = regulator_disable(phy->vdda12);
 	if (ret)
@@ -679,7 +676,17 @@ static int msm_eusb2_repeater_reset_and_init(struct msm_eusb2_phy *phy)
 	if (ret)
 		dev_err(phy->phy.dev, "repeater reset failed.\n");
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
 	ret = usb_repeater_init(phy->ur);
+#else
+	if (phy->phy.flags & PHY_HOST_MODE) {
+		dev_info(phy->phy.dev, "Init usb-repeater in HOST mode.\n");
+		usb_repeater_init_with_mode(phy->ur, OPLUS_REPEATER_PARAM_HOST);
+	}else {
+		dev_info(phy->phy.dev, "Init usb-repeater in DEVICE mode.\n");
+		usb_repeater_init_with_mode(phy->ur, OPLUS_REPEATER_PARAM_DEVICE);
+	}
+#endif
 	if (ret)
 		dev_err(phy->phy.dev, "repeater init failed.\n");
 
@@ -722,8 +729,6 @@ static int msm_eusb2_phy_init(struct usb_phy *uphy)
 			CMN_CTRL_OVERRIDE_EN, CMN_CTRL_OVERRIDE_EN);
 
 	msm_eusb2_write_readback(phy->base, USB_PHY_UTMI_CTRL5, POR, POR);
-
-	udelay(10);
 
 	msm_eusb2_write_readback(phy->base, USB_PHY_HS_PHY_CTRL_COMMON0,
 			PHY_ENABLE | RETENABLEN, PHY_ENABLE | RETENABLEN);
@@ -825,7 +830,7 @@ static int msm_eusb2_phy_set_suspend(struct usb_phy *uphy, int suspend)
 		}
 
 		/* With EUD spoof disconnect, keep clk and ldos on */
-		if ((phy->phy.flags & EUD_SPOOF_DISCONNECT) || is_eud_debug_mode_active(phy))
+		if (phy->phy.flags & EUD_SPOOF_DISCONNECT)
 			goto suspend_exit;
 
 		if (phy->ref_clk && phy->ref_clk_enable &&
@@ -988,13 +993,17 @@ static int msm_eusb2_phy_probe(struct platform_device *pdev)
 	}
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "eud_detect_reg");
-	if (res) {
-		phy->eud_detect_reg = devm_ioremap_resource(dev, res);
-		if (IS_ERR(phy->eud_detect_reg)) {
-			dev_err(dev, "eud_detect_reg ioremap err:%d\n", phy->eud_detect_reg);
-			ret = PTR_ERR(phy->eud_detect_reg);
-			goto err_ret;
-		}
+	if (!res) {
+		dev_err(dev, "missing eud_detect register address\n");
+		ret = -ENODEV;
+		goto err_ret;
+	}
+
+	phy->eud_detect_reg = devm_ioremap_resource(dev, res);
+	if (IS_ERR(phy->eud_detect_reg)) {
+		dev_err(dev, "eud_detect_reg ioremap err:%d\n", phy->eud_detect_reg);
+		ret = PTR_ERR(phy->eud_detect_reg);
+		goto err_ret;
 	}
 
 	phy->ref_clk_src = devm_clk_get(dev, "ref_clk_src");

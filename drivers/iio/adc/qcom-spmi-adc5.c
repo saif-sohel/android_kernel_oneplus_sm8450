@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/bitops.h>
@@ -155,7 +154,6 @@ struct adc5_chip {
 	struct mutex		lock;
 	bool			is_pmic7;
 	const struct adc5_data	*data;
-	int			irq_eoc;
 };
 
 static const struct vadc_prescale_ratio adc5_prescale_ratios[] = {
@@ -714,8 +712,13 @@ static const struct adc5_channels adc7_chans_pmic[ADC5_MAX_CHANNEL] = {
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
 	[ADC7_AMUX_THM4_100K_PU] = ADC5_CHAN_TEMP("amux_thm4_pu2", 0,
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
+/*#ifndef OPLUS_FEATURE_TP_BASIC*/
 	[ADC7_AMUX_THM5_100K_PU] = ADC5_CHAN_TEMP("amux_thm5_pu2", 0,
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
+/*#esle*/
+	[ADC7_AMUX_THM5_100K_PU] = ADC5_CHAN_VOLT("pm8350_board_id", 0,
+					SCALE_HW_CALIB_DEFAULT)
+/*#endif*/
 	[ADC7_AMUX_THM6_100K_PU] = ADC5_CHAN_TEMP("amux_thm6_pu2", 0,
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
 	[ADC7_GPIO1_100K_PU]	= ADC5_CHAN_TEMP("gpio1_pu2", 0,
@@ -726,8 +729,10 @@ static const struct adc5_channels adc7_chans_pmic[ADC5_MAX_CHANNEL] = {
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
 	[ADC7_GPIO4_100K_PU]	= ADC5_CHAN_TEMP("gpio4_pu2", 0,
 					SCALE_HW_CALIB_THERM_100K_PU_PM7)
-	[ADC7_V_I_BAT_THERM]	= ADC5_CHAN_TEMP("bat_therm_calib_100k_pu",
-					0, SCALE_HW_CALIB_PM5_GEN3_BATT_THERM_100K)
+/*#ifdef OPLUS_FEATURE_TP_BASIC*/
+	[ADC7_AMUX_THM5]	= ADC5_CHAN_VOLT("gpio1b_v", 1,
+					SCALE_HW_CALIB_DEFAULT)
+/*#endif*/
 };
 
 static const struct adc5_channels adc5_chans_rev2[ADC5_MAX_CHANNEL] = {
@@ -783,7 +788,7 @@ static int adc5_get_dt_channel_data(struct adc5_chip *adc,
 		chan = chan & ADC_CHANNEL_MASK;
 	}
 
-	if (chan > ADC5_MAX_CHANNEL ||
+	if (chan > ADC5_PARALLEL_ISENSE_VBAT_IDATA ||
 	    !data->adc_chans[chan].datasheet_name) {
 		dev_err(dev, "%s invalid channel number %d\n", name, chan);
 		return -EINVAL;
@@ -1043,7 +1048,7 @@ static int adc5_probe(struct platform_device *pdev)
 	struct adc5_chip *adc;
 	struct regmap *regmap;
 	const char *irq_name;
-	int ret;
+	int ret, irq_eoc;
 	u32 reg;
 
 	regmap = dev_get_regmap(dev->parent, NULL);
@@ -1063,17 +1068,6 @@ static int adc5_probe(struct platform_device *pdev)
 	adc->dev = dev;
 	adc->base = reg;
 
-	dev_set_drvdata(&pdev->dev, adc);
-
-	platform_set_drvdata(pdev, adc);
-
-	if (of_device_is_compatible(node, "qcom,spmi-adc7")) {
-		indio_dev->info = &adc7_info;
-		adc->is_pmic7 = true;
-	} else {
-		indio_dev->info = &adc5_info;
-	}
-
 	init_completion(&adc->complete);
 	mutex_init(&adc->lock);
 
@@ -1083,17 +1077,17 @@ static int adc5_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	adc->irq_eoc = platform_get_irq(pdev, 0);
-	if (adc->irq_eoc < 0) {
-		if (adc->irq_eoc == -EPROBE_DEFER || adc->irq_eoc == -EINVAL)
-			return adc->irq_eoc;
+	irq_eoc = platform_get_irq(pdev, 0);
+	if (irq_eoc < 0) {
+		if (irq_eoc == -EPROBE_DEFER || irq_eoc == -EINVAL)
+			return irq_eoc;
 		adc->poll_eoc = true;
 	} else {
 		irq_name = "pm-adc5";
 		if (adc->data->name)
 			irq_name = adc->data->name;
 
-		ret = devm_request_irq(dev, adc->irq_eoc, adc5_isr, 0,
+		ret = devm_request_irq(dev, irq_eoc, adc5_isr, 0,
 				       irq_name, adc);
 		if (ret)
 			return ret;
@@ -1108,41 +1102,21 @@ static int adc5_probe(struct platform_device *pdev)
 	return devm_iio_device_register(dev, indio_dev);
 }
 
-static int adc_restore(struct device *dev)
+static int adc5_exit(struct platform_device *pdev)
 {
-	int ret = 0;
-	struct adc5_chip *adc = dev_get_drvdata(dev);
+	struct adc5_chip *adc = platform_get_drvdata(pdev);
 
-	if (adc->irq_eoc > 0)
-		ret = devm_request_irq(dev, adc->irq_eoc, adc5_isr, 0,
-				       "pm-adc5", adc);
-
-	return ret;
-}
-
-static int adc_freeze(struct device *dev)
-{
-	struct adc5_chip *adc = dev_get_drvdata(dev);
-
-	if (adc->irq_eoc > 0)
-		devm_free_irq(dev, adc->irq_eoc, adc);
-
+	mutex_destroy(&adc->lock);
 	return 0;
 }
-
-static const struct dev_pm_ops adc_pm_ops = {
-	.freeze = adc_freeze,
-	.thaw = adc_restore,
-	.restore = adc_restore,
-};
 
 static struct platform_driver adc5_driver = {
 	.driver = {
 		.name = "qcom-spmi-adc5",
 		.of_match_table = adc5_match_table,
-		.pm = &adc_pm_ops,
 	},
 	.probe = adc5_probe,
+	.remove = adc5_exit,
 };
 module_platform_driver(adc5_driver);
 

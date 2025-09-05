@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -56,6 +55,8 @@ struct ffs_ep {
 	struct usb_endpoint_descriptor	*descs[3];
 
 	u8				num;
+
+	int				status;	/* P: epfile->mutex */
 };
 
 /* Copied from f_fs.c */
@@ -187,9 +188,6 @@ static void create_ipc_context(const char *dev_name, struct ffs_data *ffs)
 static void *get_ipc_context(struct ffs_data *ffs)
 {
 	int idx = 0;
-
-	if (!ffs)
-		return NULL;
 
 	idx = ffs_inst_exists(ffs);
 	if (idx >= 0)

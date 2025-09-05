@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #ifndef __KGSL_PWRCTRL_H
 #define __KGSL_PWRCTRL_H
@@ -12,7 +12,7 @@
 /*****************************************************************************
  * power flags
  ****************************************************************************/
-#define KGSL_MAX_CLKS 19
+#define KGSL_MAX_CLKS 18
 
 #define KGSL_MAX_PWRLEVELS 16
 
@@ -95,6 +95,7 @@ struct kgsl_pwrlevel {
  * @clk_stats - structure of clock statistics
  * @input_disable - To disable GPU wakeup on touch input event
  * @bus_control - true if the bus calculation is independent
+ * @bus_nolimit - true if the bus vote freq not limit in opp table
  * @bus_mod - modifier from the current power level for the bus vote
  * @bus_percent_ab - current percent of total possible bus usage
  * @bus_width - target specific bus width in number of bytes
@@ -118,12 +119,6 @@ struct kgsl_pwrctrl {
 	struct regulator *gx_gdsc_parent;
 	/** @gx_gdsc_parent_min_corner: Minimum supply voltage for GX parent */
 	u32 gx_gdsc_parent_min_corner;
-	/** @cx_gdsc_nb: Notifier block for cx gdsc regulator */
-	struct notifier_block cx_gdsc_nb;
-	/** @cx_gdsc_gate: Completion to signal cx gdsc collapse status */
-	struct completion cx_gdsc_gate;
-	/** @cx_gdsc_wait: Whether to wait for cx gdsc to turn off */
-	bool cx_gdsc_wait;
 	int isense_clk_indx;
 	int isense_clk_on_level;
 	unsigned long power_flags;
@@ -143,6 +138,9 @@ struct kgsl_pwrctrl {
 	u64 clock_times[KGSL_MAX_PWRLEVELS];
 	struct kgsl_clk_stats clk_stats;
 	bool bus_control;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	bool bus_nolimit;
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 	int bus_mod;
 	unsigned int bus_percent_ab;
 	unsigned int bus_width;
@@ -175,12 +173,6 @@ struct kgsl_pwrctrl {
 	ktime_t last_stat_updated;
 	/** @nb_max: Notifier block for DEV_PM_QOS_MAX_FREQUENCY */
 	struct notifier_block nb_max;
-	/** @cur_dcvs_buslevel: Current bus level decided by bus DCVS */
-	u32 cur_dcvs_buslevel;
-	/** @rt_bus_hint: IB level hint for real time clients i.e. RB-0 */
-	u32 rt_bus_hint;
-	/** @rt_bus_hint_active: Boolean flag to indicate if RT bus hint is active */
-	bool rt_bus_hint_active;
 };
 
 int kgsl_pwrctrl_init(struct kgsl_device *device);
@@ -286,22 +278,4 @@ void kgsl_pwrctrl_irq(struct kgsl_device *device, bool state);
  * Clear the l3 vote when going into slumber
  */
 void kgsl_pwrctrl_clear_l3_vote(struct kgsl_device *device);
-
-/**
- * kgsl_pwrctrl_enable_cx_gdsc - Enable cx gdsc
- * @device: Pointer to the kgsl device
- * @regulator: Pointer to the CX domain regulator
- *
- * Return: 0 on success or negative error on failure
- */
-int kgsl_pwrctrl_enable_cx_gdsc(struct kgsl_device *device,
-	struct regulator *regulator);
-
-/**
- * kgsl_pwrctrl_disable_cx_gdsc - Disable cx gdsc
- * @device: Pointer to the kgsl device
- * @regulator: Pointer to the CX domain regulator
- */
-void kgsl_pwrctrl_disable_cx_gdsc(struct kgsl_device *device,
-	struct regulator *regulator);
 #endif /* __KGSL_PWRCTRL_H */

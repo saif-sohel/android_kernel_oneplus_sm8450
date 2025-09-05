@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/file.h>
@@ -235,10 +235,13 @@ static void kgsl_sharedmem_vbo_put_gpuaddr(struct kgsl_memdesc *memdesc)
 	struct interval_tree_node *node, *next;
 	struct kgsl_memdesc_bind_range *range;
 	int ret = 0;
+	bool unmap_fail;
 
 	/* Unmap the entire pagetable region */
 	ret = kgsl_mmu_unmap_range(memdesc->pagetable, memdesc,
 		0, memdesc->size);
+
+	unmap_fail = ret;
 
 	/*
 	 * FIXME: do we have a use after free potential here?  We might need to
@@ -260,9 +263,11 @@ static void kgsl_sharedmem_vbo_put_gpuaddr(struct kgsl_memdesc *memdesc)
 			bind_range_destroy(range);
 		else
 			kfree(range);
+
+		unmap_fail = unmap_fail || ret;
 	}
 
-	if (ret)
+	if (unmap_fail)
 		return;
 
 	/* Put back the GPU address */
@@ -322,8 +327,7 @@ static void kgsl_sharedmem_free_bind_op(struct kgsl_sharedmem_bind_op *op)
 		/* Release the reference on the child entry */
 		kgsl_mem_entry_put_deferred(op->ops[i].entry);
 	}
-
-	/* Release the reference on the target entry */
+		/* Release the reference on the target entry */
 	kgsl_mem_entry_put_deferred(op->target);
 
 	kvfree(op->ops);

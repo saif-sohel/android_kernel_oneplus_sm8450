@@ -19,7 +19,19 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/qcom-cpufreq-hw.h>
-#include <linux/topology.h>
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+#include <linux/oplus_omrg.h>
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SUGOV_POWER_EFFIENCY)
+#include <linux/cpufreq_effiency.h>
+#endif
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_GKI_CPUFREQ_BOUNCING)
+#include <linux/cpufreq_bouncing.h>
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+#include <linux/cpufreq_health.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/dcvsh.h>
@@ -35,8 +47,8 @@
 #define MAX_FN_SIZE			20
 #define LIMITS_POLLING_DELAY_MS		4
 
-#define CYCLE_CNTR_OFFSET(core_id, m, acc_count)		\
-			(acc_count ? ((core_id + 1) * 4) : 0)
+#define CYCLE_CNTR_OFFSET(c, m, acc_count)				\
+			(acc_count ? ((c - cpumask_first(m) + 1) * 4) : 0)
 
 enum {
 	REG_ENABLE,
@@ -228,7 +240,7 @@ u64 qcom_cpufreq_get_cpu_cycle_counter(int cpu)
 	cpu_counter = &qcom_cpufreq_counter[cpu];
 	spin_lock_irqsave(&cpu_counter->lock, flags);
 
-	offset = CYCLE_CNTR_OFFSET(topology_core_id(cpu), policy->related_cpus,
+	offset = CYCLE_CNTR_OFFSET(cpu, policy->related_cpus,
 					accumulative_counter);
 	val = readl_relaxed_no_log(policy->driver_data +
 				    offsets[REG_CYCLE_CNTR] + offset);
@@ -245,8 +257,6 @@ u64 qcom_cpufreq_get_cpu_cycle_counter(int cpu)
 	}
 	cycle_counter_ret = cpu_counter->total_cycle_counter;
 	spin_unlock_irqrestore(&cpu_counter->lock, flags);
-
-	pr_debug("CPU %u, core-id 0x%x, offset %u\n", cpu, topology_core_id(cpu), offset);
 
 	return cycle_counter_ret;
 }
@@ -265,6 +275,9 @@ qcom_cpufreq_hw_target_index(struct cpufreq_policy *policy,
 	}
 
 	writel_relaxed(index, policy->driver_data + offsets[REG_PERF_STATE]);
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	omrg_cpufreq_check_limit(policy, policy->freq_table[index].frequency);
+#endif
 
 	return 0;
 }
@@ -375,6 +388,20 @@ static void qcom_cpufreq_ready(struct cpufreq_policy *policy)
 	unsigned int cpu = policy->cpu;
 	struct cpufreq_qcom *c = qcom_freq_domain_map[cpu];
 
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	omrg_cpufreq_register(policy);
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SUGOV_POWER_EFFIENCY)
+	frequence_opp_init(policy);
+#endif
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_GKI_CPUFREQ_BOUNCING)
+	cb_stuff_init(policy);
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+	if(cpufreq_health_register(policy))
+		pr_err("cpufreq health init failed!\n");
+#endif
 	mutex_lock(&c->dcvsh_lock);
 
 	c->exited = false;
@@ -411,6 +438,10 @@ static int qcom_cpufreq_exit(struct cpufreq_policy *policy)
 {
 	unsigned int cpu = policy->cpu;
 	struct cpufreq_qcom *c = qcom_freq_domain_map[cpu];
+
+#if IS_ENABLED(CONFIG_OPLUS_OMRG)
+	omrg_cpufreq_unregister(policy);
+#endif
 
 	mutex_lock(&c->dcvsh_lock);
 	c->exited = true;
@@ -464,9 +495,6 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 		src = FIELD_GET(LUT_SRC, data);
 		lval = FIELD_GET(LUT_L_VAL, data);
 		core_count = FIELD_GET(LUT_CORE_COUNT, data);
-
-		if (of_device_is_compatible(dev->of_node, "qcom,cpufreq-hw-epss"))
-			core_count = FIELD_GET(GENMASK(19, 16), data);
 
 		data = readl_relaxed(c->base + offsets[REG_VOLT_LUT] +
 				      i * lut_row_size);

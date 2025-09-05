@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
  *
- * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #define pr_fmt(fmt)	"qti-flash: %s: " fmt, __func__
 
@@ -125,6 +125,10 @@
 #define VLED_MAX_DEFAULT_UV			3500000
 
 #define LED_MASK_ALL(led)		GENMASK(led->max_channels - 1, 0)
+
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int flsh_max_current_mA = 0;
+#endif
 
 enum flash_led_type {
 	FLASH_LED_TYPE_UNKNOWN,
@@ -738,6 +742,15 @@ static int qti_flash_switch_enable(struct flash_switch_data *snode)
 		if (!(snode->led_mask & BIT(led->fnode[i].id)) ||
 			!led->fnode[i].configured)
 			continue;
+		/*
+		* For flash, LMH mitigation needs to be enabled
+		* if total current used is greater than or
+		* equal to 1A.
+		*/
+
+		type = led->fnode[i].type;
+		if (type == FLASH_LED_TYPE_FLASH)
+			total_curr_ma += led->fnode[i].user_current_ma;
 
 		/*
 		 * For flash, LMH mitigation needs to be enabled
@@ -756,7 +769,6 @@ static int qti_flash_switch_enable(struct flash_switch_data *snode)
 		rc = qti_flash_lmh_mitigation_config(led, true);
 		if (rc < 0)
 			return rc;
-
 		/* Wait for lmh mitigation to take effect */
 		udelay(500);
 	} else if (led->trigger_lmh) {
@@ -964,6 +976,18 @@ static int qti_flash_led_get_voltage_headroom(
 	return voltage_hdrm_max;
 }
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int set_flash_max_current_mA(int max_current_mA)
+{
+	flsh_max_current_mA	= max_current_mA;
+	pr_err("flsh_max_current_mA=%d\n",
+			flsh_max_current_mA);
+
+	return 0;
+}
+EXPORT_SYMBOL(set_flash_max_current_mA);
+#endif
+
 static int qti_flash_led_calc_max_avail_current(
 			struct qti_flash_led *led,
 			int *max_current_ma)
@@ -974,6 +998,13 @@ static int qti_flash_led_calc_max_avail_current(
 		vph_flash_uv, vin_flash_uv, p_flash_fw;
 	union power_supply_propval prop = {};
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+	if (flsh_max_current_mA > 0) {
+		*max_current_ma = flsh_max_current_mA;
+		pr_err("max_current_ma=%d\n",*max_current_ma);
+		return 0;
+	}
+#endif
 	rc = qti_battery_charger_get_prop("battery", BATTERY_RESISTANCE,
 						&rbatt_uohm);
 	if (rc < 0) {
@@ -1713,8 +1744,8 @@ struct flash_led_register {
 
 static const struct flash_led_register ext_setup_reg_list[] = {
 	{ FLASH_LED_IRESOLUTION, 0x01, FLASH_LED_IRESOLUTION_MASK(0) },
-	{ FLASH_LED_STROBE_CTRL(0), (1 << FLASH_LED_STROBE_CFG_SHIFT) | FLASH_LED_HW_SW_STROBE_SEL |
-		FLASH_LED_STROBE_POLARITY, GENMASK(7, 0) },
+	{ FLASH_LED_STROBE_CTRL(0), FLASH_LED_HW_SW_STROBE_SEL
+		| FLASH_LED_STROBE_TRIGGER | FLASH_LED_STROBE_POLARITY, GENMASK(7, 0) },
 	{ FLASH_LED_HDRM_WINDOW, 0x0, FLASH_LED_HI_LO_WIN_MASK },
 	{ FLASH_LED_HDRM_PRGM, 0x20, FLASH_LED_HDRM_CTRL_MODE_MASK | FLASH_LED_VOLTAGE_MASK },
 	{ FLASH_LED_WARMUP_DELAY, 0x0, FLASH_LED_WARMUP_DELAY_MASK },
@@ -1982,6 +2013,8 @@ static int qti_flash_led_remove(struct platform_device *pdev)
 		for (j = 0; j < ARRAY_SIZE(qti_flash_led_attrs); j++)
 			sysfs_remove_file(&led->snode[i].cdev.dev->kobj,
 				&qti_flash_led_attrs[j].attr);
+
+		led_classdev_unregister(&led->snode[i].cdev);
 	}
 
 	for (i = 0; (i < led->num_fnodes); i++)

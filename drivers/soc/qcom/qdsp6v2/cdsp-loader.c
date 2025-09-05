@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012-2014, 2017-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/init.h>
@@ -152,11 +151,10 @@ static void cdsp_loader_unload(struct platform_device *pdev)
 	if (!priv)
 		return;
 
-	if (priv->pil_h && cdsp_state == CDSP_SUBSYS_LOADED) {
+	if (priv->pil_h) {
 		dev_dbg(&pdev->dev, "%s: calling subsystem_put\n", __func__);
 		rproc_shutdown(priv->pil_h);
 		priv->pil_h = NULL;
-		cdsp_state = CDSP_SUBSYS_DOWN;
 	}
 }
 
@@ -230,7 +228,6 @@ static int cdsp_loader_remove(struct platform_device *pdev)
 	if (priv->pil_h) {
 		rproc_shutdown(priv->pil_h);
 		priv->pil_h = NULL;
-		cdsp_state = CDSP_SUBSYS_DOWN;
 	}
 
 	if (priv->boot_cdsp_obj) {

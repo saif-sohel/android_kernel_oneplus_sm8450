@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
-#include <linux/clk/qcom.h>
 #include <linux/interconnect.h>
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
@@ -26,7 +25,7 @@
 #define KGSL_MAX_BUSLEVELS	20
 
 /* Order deeply matters here because reasons. New entries go on the end */
-static const char * const clocks[KGSL_MAX_CLKS] = {
+static const char * const clocks[] = {
 	"src_clk",
 	"core_clk",
 	"iface_clk",
@@ -808,6 +807,36 @@ static ssize_t bus_split_store(struct device *dev,
 	return count;
 }
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+static ssize_t bus_nolimit_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+		device->pwrctrl.bus_nolimit ? 1 : 0);
+}
+
+static ssize_t bus_nolimit_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned int val = 0;
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	int ret;
+
+	ret = kstrtou32(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&device->mutex);
+	device->pwrctrl.bus_nolimit = val ? true : false;
+	mutex_unlock(&device->mutex);
+
+	return count;
+}
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
+
 static ssize_t default_pwrlevel_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -1107,6 +1136,9 @@ static DEVICE_ATTR_RW(force_clk_on);
 static DEVICE_ATTR_RW(force_bus_on);
 static DEVICE_ATTR_RW(force_rail_on);
 static DEVICE_ATTR_RW(bus_split);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+static DEVICE_ATTR_RW(bus_nolimit);
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 static DEVICE_ATTR_RW(default_pwrlevel);
 static DEVICE_ATTR_RO(popp);
 static DEVICE_ATTR_RW(force_no_nap);
@@ -1136,6 +1168,9 @@ static const struct attribute *pwrctrl_attr_list[] = {
 	&dev_attr_force_no_nap.attr,
 	&dev_attr_bus_split.attr,
 	&dev_attr_default_pwrlevel.attr,
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	&dev_attr_bus_nolimit.attr,
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 	&dev_attr_popp.attr,
 	&dev_attr_gpu_busy_percentage.attr,
 	&dev_attr_min_clock_mhz.attr,
@@ -1319,30 +1354,8 @@ int kgsl_pwrctrl_axi(struct kgsl_device *device, bool state)
 	return 0;
 }
 
-int kgsl_pwrctrl_enable_cx_gdsc(struct kgsl_device *device, struct regulator *regulator)
-{
-	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
-	int ret;
-
-	if (IS_ERR_OR_NULL(regulator))
-		return 0;
-
-	ret = wait_for_completion_timeout(&pwr->cx_gdsc_gate, msecs_to_jiffies(5000));
-	if (!ret) {
-		dev_err(device->dev, "GPU CX wait timeout. Dumping CX votes:\n");
-		/* Dump the cx regulator consumer list */
-		qcom_clk_dump(NULL, regulator, false);
-	}
-
-	ret = regulator_enable(regulator);
-	if (ret)
-		dev_err(device->dev, "Failed to enable CX regulator: %d\n", ret);
-
-	pwr->cx_gdsc_wait = false;
-	return ret;
-}
-
-static int kgsl_pwtctrl_enable_gx_gdsc(struct kgsl_device *device, struct regulator *regulator)
+static int enable_regulator(struct device *dev, struct regulator *regulator,
+		const char *name)
 {
 	int ret;
 
@@ -1351,27 +1364,8 @@ static int kgsl_pwtctrl_enable_gx_gdsc(struct kgsl_device *device, struct regula
 
 	ret = regulator_enable(regulator);
 	if (ret)
-		dev_err(device->dev, "Failed to enable GX regulator: %d\n", ret);
+		dev_err(dev, "Unable to enable regulator %s: %d\n", name, ret);
 	return ret;
-}
-
-void kgsl_pwrctrl_disable_cx_gdsc(struct kgsl_device *device, struct regulator *regulator)
-{
-	if (IS_ERR_OR_NULL(regulator))
-		return;
-
-	reinit_completion(&device->pwrctrl.cx_gdsc_gate);
-	device->pwrctrl.cx_gdsc_wait = true;
-	regulator_disable(regulator);
-}
-
-static void kgsl_pwrctrl_disable_gx_gdsc(struct kgsl_device *device, struct regulator *regulator)
-{
-	if (IS_ERR_OR_NULL(regulator))
-		return;
-
-	if (!kgsl_regulator_disable_wait(regulator, 200))
-		dev_err(device->dev, "Regulator vdd is stuck on\n");
 }
 
 static int enable_regulators(struct kgsl_device *device)
@@ -1382,14 +1376,15 @@ static int enable_regulators(struct kgsl_device *device)
 	if (test_and_set_bit(KGSL_PWRFLAGS_POWER_ON, &pwr->power_flags))
 		return 0;
 
-	ret = kgsl_pwrctrl_enable_cx_gdsc(device, pwr->cx_gdsc);
+	ret = enable_regulator(&device->pdev->dev, pwr->cx_gdsc, "vddcx");
 	if (!ret) {
 		/* Set parent in retention voltage to power up vdd supply */
 		ret = kgsl_regulator_set_voltage(device->dev,
 				pwr->gx_gdsc_parent,
 				pwr->gx_gdsc_parent_min_corner);
 		if (!ret)
-			ret = kgsl_pwtctrl_enable_gx_gdsc(device, pwr->gx_gdsc);
+			ret = enable_regulator(&device->pdev->dev,
+					pwr->gx_gdsc, "vdd");
 	}
 
 	if (ret) {
@@ -1420,8 +1415,10 @@ static int kgsl_pwrctrl_pwrrail(struct kgsl_device *device, bool state)
 		if (test_and_clear_bit(KGSL_PWRFLAGS_POWER_ON,
 			&pwr->power_flags)) {
 			trace_kgsl_rail(device, state);
-			kgsl_pwrctrl_disable_gx_gdsc(device, pwr->gx_gdsc);
-			kgsl_pwrctrl_disable_cx_gdsc(device, pwr->cx_gdsc);
+			if (!kgsl_regulator_disable_wait(pwr->gx_gdsc, 200))
+				dev_err(device->dev, "Regulator vdd is stuck on\n");
+			if (!kgsl_regulator_disable_wait(pwr->cx_gdsc, 200))
+				dev_err(device->dev, "Regulator vddcx is stuck on\n");
 		}
 	} else
 		status = enable_regulators(device);
@@ -1625,6 +1622,9 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		if (freq >= pwr->pwrlevels[i].gpu_freq)
 			pwr->pwrlevels[i].gpu_freq = freq;
 	}
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	pwr->bus_nolimit = false;
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 
 	clk_set_rate(pwr->grp_clks[0],
 		pwr->pwrlevels[pwr->num_pwrlevels - 1].gpu_freq);
@@ -1658,15 +1658,6 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 				"vdd-parent-min-corner not found\n");
 			return -ENODEV;
 		}
-	}
-
-	init_completion(&pwr->cx_gdsc_gate);
-	complete_all(&pwr->cx_gdsc_gate);
-
-	result = device->ftbl->register_gdsc_notifier(device);
-	if (result) {
-		dev_err(&pdev->dev, "Failed to register gdsc notifier: %d\n", result);
-		return result;
 	}
 
 	pwr->power_flags = 0;

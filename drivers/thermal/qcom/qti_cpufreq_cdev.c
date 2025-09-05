@@ -174,39 +174,32 @@ static int cpufreq_cdev_probe(struct platform_device *pdev)
 {
 	struct cpufreq_cdev_device *cdev_data;
 	struct device_node *np = pdev->dev.of_node, *cpu_phandle = NULL;
-	struct device_node *subsys_np = NULL;
 	struct device *dev = &pdev->dev;
 	struct device *cpu_dev;
 	int cpu = 0, ret = 0;
-	int cpu_count;
 	struct of_phandle_iterator it;
 
 	mutex_lock(&qti_cpufreq_cdev_lock);
-	for_each_available_child_of_node(np, subsys_np) {
-		of_phandle_iterator_init(&it, subsys_np, "qcom,cpus", NULL, 0);
-		cpu_count = 0;
-		while (of_phandle_iterator_next(&it) == 0) {
-			cpu_phandle = it.node;
-			for_each_possible_cpu(cpu) {
-				cpu_dev = get_cpu_device(cpu);
-				if (cpu_dev && cpu_dev->of_node == cpu_phandle) {
-					cpu_count++;
-					break;
-				}
-			}
-			if (cpu_count)
-				break;
-		}
-		if (!cpu_count)
-			continue;
+	of_phandle_iterator_init(&it, np, "qcom,cpus", NULL, 0);
+	while (of_phandle_iterator_next(&it) == 0) {
 		cdev_data = devm_kzalloc(dev, sizeof(*cdev_data), GFP_KERNEL);
 		if (!cdev_data) {
 			mutex_unlock(&qti_cpufreq_cdev_lock);
 			return -ENOMEM;
 		}
-		cdev_data->cpu = cpu;
+		cpu_phandle = it.node;
+		cdev_data->cpu = -1;
+		for_each_possible_cpu(cpu) {
+			cpu_dev = get_cpu_device(cpu);
+			if (cpu_dev && cpu_dev->of_node == cpu_phandle) {
+				cdev_data->cpu = cpu;
+				break;
+			}
+		}
+		if (cdev_data->cpu == -1)
+			continue;
 		snprintf(cdev_data->cdev_name, THERMAL_NAME_LENGTH,
-				subsys_np->name);
+				CPUFREQ_CDEV_NAME, cpu);
 		INIT_WORK(&cdev_data->reg_work,
 				cpufreq_cdev_register);
 		list_add(&cdev_data->node, &qti_cpufreq_cdev_list);

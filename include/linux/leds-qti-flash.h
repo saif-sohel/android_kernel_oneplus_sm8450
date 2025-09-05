@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef __LEDS_QTI_FLASH_H
@@ -27,6 +27,11 @@ int qti_flash_led_prepare(struct led_trigger *trig,
 			int options, int *max_current);
 int qti_flash_led_set_param(struct led_trigger *trig,
 			struct flash_led_param param);
+
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int set_flash_max_current_mA(int max_current_mA);
+#endif
+
 #else
 static inline int qti_flash_led_prepare(struct led_trigger *trig,
 					int options, int *max_current)
@@ -35,18 +40,7 @@ static inline int qti_flash_led_prepare(struct led_trigger *trig,
 }
 
 static inline int qti_flash_led_set_param(struct led_trigger *trig,
-			struct flash_led_param param)
-{
-	return -EINVAL;
-}
-#endif
-
-#if IS_ENABLED(CONFIG_BACKLIGHT_QCOM_SPMI_WLED)
-int wled_flash_led_prepare(struct led_trigger *trig, int options,
-					int *max_current);
-#else
-static inline int wled_flash_led_prepare(struct led_trigger *trig, int options,
-					int *max_current)
+			struct flash_led_param param);
 {
 	return -EINVAL;
 }

@@ -2039,6 +2039,7 @@ static inline void __dst_negative_advice(struct sock *sk)
 		negative_advice = (android_dst_ops_negative_advice_new_t)dst->ops->negative_advice;
 		negative_advice(sk, dst);
 	}
+
 }
 
 static inline void dst_negative_advice(struct sock *sk)
@@ -2053,7 +2054,7 @@ __sk_dst_set(struct sock *sk, struct dst_entry *dst)
 	struct dst_entry *old_dst;
 
 	sk_tx_queue_clear(sk);
-	WRITE_ONCE(sk->sk_dst_pending_confirm, 0);
+	sk->sk_dst_pending_confirm = 0;
 	old_dst = rcu_dereference_protected(sk->sk_dst_cache,
 					    lockdep_sock_is_held(sk));
 	rcu_assign_pointer(sk->sk_dst_cache, dst);
@@ -2066,7 +2067,7 @@ sk_dst_set(struct sock *sk, struct dst_entry *dst)
 	struct dst_entry *old_dst;
 
 	sk_tx_queue_clear(sk);
-	WRITE_ONCE(sk->sk_dst_pending_confirm, 0);
+	sk->sk_dst_pending_confirm = 0;
 	old_dst = xchg((__force struct dst_entry **)&sk->sk_dst_cache, dst);
 	dst_release(old_dst);
 }

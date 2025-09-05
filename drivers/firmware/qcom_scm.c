@@ -528,15 +528,18 @@ int __qcom_scm_set_dload_mode(struct device *dev, enum qcom_download_mode mode)
 void qcom_scm_set_download_mode(enum qcom_download_mode mode,
 				phys_addr_t tcsr_boot_misc)
 {
+	bool avail;
 	int ret = 0;
 	struct device *dev = __scm ? __scm->dev : NULL;
 
-	if (tcsr_boot_misc || (__scm && __scm->dload_mode_addr)) {
-		ret = qcom_scm_io_writel(tcsr_boot_misc ? : __scm->dload_mode_addr, mode);
-	} else if (__qcom_scm_is_call_available(dev,
-				QCOM_SCM_SVC_BOOT,
-				QCOM_SCM_BOOT_SET_DLOAD_MODE)) {
+	avail = __qcom_scm_is_call_available(dev,
+					     QCOM_SCM_SVC_BOOT,
+					     QCOM_SCM_BOOT_SET_DLOAD_MODE);
+	if (avail) {
 		ret = __qcom_scm_set_dload_mode(dev, mode);
+	} else if (tcsr_boot_misc || (__scm && __scm->dload_mode_addr)) {
+		ret = qcom_scm_io_writel(
+			tcsr_boot_misc ? : __scm->dload_mode_addr, mode);
 	} else {
 		dev_err(dev,
 			"No available mechanism for setting download mode\n");
@@ -803,34 +806,6 @@ int qcom_scm_get_sec_dump_state(u32 *dump_state)
 }
 EXPORT_SYMBOL(qcom_scm_get_sec_dump_state);
 
-int __qcom_scm_get_llcc_missrate(struct device *dev, phys_addr_t in_buf,
-	size_t in_buf_size, phys_addr_t out_buf, size_t out_buf_size)
-{
-	int ret;
-	struct qcom_scm_desc desc = {
-		.svc = QCOM_SCM_SVC_MISSRATE,
-		.cmd = QCOM_SCM_GET_LLCC_MISSRATE_STATS_ID,
-		.owner = ARM_SMCCC_OWNER_SIP,
-		.arginfo = QCOM_SCM_ARGS(4, QCOM_SCM_RW, QCOM_SCM_VAL, QCOM_SCM_RW, QCOM_SCM_VAL),
-	};
-
-	desc.args[0] = in_buf;
-	desc.args[1] = in_buf_size;
-	desc.args[2] = out_buf;
-	desc.args[3] = out_buf_size;
-	ret = qcom_scm_call(dev, &desc, NULL);
-
-	return ret;
-}
-
-int qcom_scm_get_llcc_missrate(phys_addr_t in_buf,
-	size_t in_buf_size, phys_addr_t out_buf, size_t out_buf_size)
-{
-	return __qcom_scm_get_llcc_missrate(__scm ? __scm->dev : NULL, in_buf,
-			in_buf_size, out_buf, out_buf_size);
-}
-EXPORT_SYMBOL_GPL(qcom_scm_get_llcc_missrate);
-
 int qcom_scm_assign_dump_table_region(bool is_assign, phys_addr_t addr, size_t size)
 {
 	struct qcom_scm_desc desc = {
@@ -981,9 +956,11 @@ void qcom_scm_halt_spmi_pmic_arbiter(void)
 		.arginfo = QCOM_SCM_ARGS(1),
 	};
 
+	pr_crit("Calling SCM to disable SPMI PMIC arbiter\n");
+
 	ret = qcom_scm_call_atomic(__scm->dev, &desc, NULL);
 	if (ret)
-		pr_debug("Failed to halt_spmi_pmic_arbiter=0x%x\n", ret);
+		pr_err("Failed to halt_spmi_pmic_arbiter=0x%x\n", ret);
 }
 EXPORT_SYMBOL(qcom_scm_halt_spmi_pmic_arbiter);
 
@@ -1879,19 +1856,6 @@ int qcom_scm_config_set_ice_key(uint32_t index, phys_addr_t paddr, size_t size,
 }
 EXPORT_SYMBOL(qcom_scm_config_set_ice_key);
 
-int qcom_scm_hibernate_exit(void)
-{
-
-	struct qcom_scm_desc desc = {
-		.svc = QCOM_SCM_SVC_ES,
-		.cmd = QCOM_SCM_ES_HIBERNATE_EXIT,
-		.owner = ARM_SMCCC_OWNER_SIP,
-	};
-
-	return qcom_scm_call_noretry(__scm->dev, &desc, NULL);
-}
-EXPORT_SYMBOL_GPL(qcom_scm_hibernate_exit);
-
 int qcom_scm_clear_ice_key(uint32_t index,  unsigned int ce)
 {
 	struct qcom_scm_desc desc = {
@@ -2309,64 +2273,6 @@ int qcom_scm_ice_restore_cfg(void)
 	return qcom_scm_call(__scm->dev, &desc, NULL);
 }
 EXPORT_SYMBOL(qcom_scm_ice_restore_cfg);
-
-bool qcom_scm_lmh_dcvsh_available(void)
-{
-	return __qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_LMH, QCOM_SCM_LMH_LIMIT_DCVSH);
-}
-EXPORT_SYMBOL(qcom_scm_lmh_dcvsh_available);
-
-int qcom_scm_lmh_profile_change(u32 profile_id)
-{
-	struct qcom_scm_desc desc = {
-		.svc = QCOM_SCM_SVC_LMH,
-		.cmd = QCOM_SCM_LMH_LIMIT_PROFILE_CHANGE,
-		.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL),
-		.args[0] = profile_id,
-		.owner = ARM_SMCCC_OWNER_SIP,
-	};
-
-	return qcom_scm_call(__scm->dev, &desc, NULL);
-}
-EXPORT_SYMBOL(qcom_scm_lmh_profile_change);
-
-int qcom_scm_lmh_dcvsh(u32 payload_fn, u32 payload_reg, u32 payload_val,
-		       u64 limit_node, u32 node_id, u64 version)
-{
-	dma_addr_t payload_phys;
-	u32 *payload_buf;
-	int ret, payload_size = 5 * sizeof(u32);
-
-	struct qcom_scm_desc desc = {
-		.svc = QCOM_SCM_SVC_LMH,
-		.cmd = QCOM_SCM_LMH_LIMIT_DCVSH,
-		.arginfo = QCOM_SCM_ARGS(5, QCOM_SCM_RO, QCOM_SCM_VAL, QCOM_SCM_VAL,
-					QCOM_SCM_VAL, QCOM_SCM_VAL),
-		.args[1] = payload_size,
-		.args[2] = limit_node,
-		.args[3] = node_id,
-		.args[4] = version,
-		.owner = ARM_SMCCC_OWNER_SIP,
-	};
-
-	payload_buf = dma_alloc_coherent(__scm->dev, payload_size, &payload_phys, GFP_KERNEL);
-	if (!payload_buf)
-		return -ENOMEM;
-
-	payload_buf[0] = payload_fn;
-	payload_buf[1] = 0;
-	payload_buf[2] = payload_reg;
-	payload_buf[3] = 1;
-	payload_buf[4] = payload_val;
-
-	desc.args[0] = payload_phys;
-
-	ret = qcom_scm_call(__scm->dev, &desc, NULL);
-
-	dma_free_coherent(__scm->dev, payload_size, payload_buf, payload_phys);
-	return ret;
-}
-EXPORT_SYMBOL(qcom_scm_lmh_dcvsh);
 
 int qcom_scm_get_tz_log_feat_id(u64 *version)
 {

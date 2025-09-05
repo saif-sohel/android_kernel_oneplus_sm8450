@@ -25,14 +25,11 @@
 #include <linux/rwsem.h>
 
 #ifdef __GENKSYMS__
-struct slabinfo;
 struct cgroup_subsys_state;
 struct device;
 struct mem_cgroup;
 struct readahead_control;
 #else
-/* struct slabinfo */
-#include <../mm/slab.h>
 /* struct cgroup_subsys_state */
 #include <linux/cgroup-defs.h>
 /* struct device */
@@ -229,6 +226,7 @@ DECLARE_HOOK(android_vh_tune_mmap_readaround,
 DECLARE_RESTRICTED_HOOK(android_rvh_handle_pte_fault_end,
 	TP_PROTO(struct vm_fault *vmf, unsigned long highest_memmap_pfn),
 	TP_ARGS(vmf, highest_memmap_pfn), 1);
+
 DECLARE_HOOK(android_vh_handle_pte_fault_end,
 	TP_PROTO(struct vm_fault *vmf, unsigned long highest_memmap_pfn),
 	TP_ARGS(vmf, highest_memmap_pfn));

@@ -359,36 +359,33 @@ static int adspsleepmon_smem_init(void)
 	g_adspsleepmon.lpm_stats = qcom_smem_get(
 						ADSPSLEEPMON_SMEM_ADSP_PID,
 						ADSPSLEEPMON_SLEEPSTATS_ADSP_SMEM_ID,
-						&size);
+						NULL);
 
-	if (IS_ERR_OR_NULL(g_adspsleepmon.lpm_stats) ||
-		(sizeof(struct sleep_stats) > size)) {
-		pr_err("Failed to get sleep stats from SMEM for ADSP: %d, size: %d\n",
-				PTR_ERR(g_adspsleepmon.lpm_stats), size);
+	if (IS_ERR_OR_NULL(g_adspsleepmon.lpm_stats)) {
+		pr_err("Failed to get sleep stats from SMEM for ADSP: %d\n",
+				PTR_ERR(g_adspsleepmon.lpm_stats));
 		return -ENOMEM;
 	}
 
 	g_adspsleepmon.lpi_stats = qcom_smem_get(
 						ADSPSLEEPMON_SMEM_ADSP_PID,
 						ADSPSLEEPMON_SLEEPSTATS_ADSP_LPI_SMEM_ID,
-						&size);
+						NULL);
 
-	if (IS_ERR_OR_NULL(g_adspsleepmon.lpi_stats) ||
-		(sizeof(struct sleep_stats) > size)) {
-		pr_err("Failed to get LPI sleep stats from SMEM for ADSP: %d, size: %d\n",
-				PTR_ERR(g_adspsleepmon.lpi_stats), size);
+	if (IS_ERR_OR_NULL(g_adspsleepmon.lpi_stats)) {
+		pr_err("Failed to get LPI sleep stats from SMEM for ADSP: %d\n",
+				PTR_ERR(g_adspsleepmon.lpi_stats));
 		return -ENOMEM;
 	}
 
 	g_adspsleepmon.dsppm_stats = qcom_smem_get(
 						   ADSPSLEEPMON_SMEM_ADSP_PID,
 						ADSPSLEEPMON_DSPPMSTATS_SMEM_ID,
-						&size);
+						NULL);
 
-	if (IS_ERR_OR_NULL(g_adspsleepmon.dsppm_stats) ||
-		(sizeof(struct dsppm_stats) > size)) {
-		pr_err("Failed to get DSPPM stats from SMEM for ADSP: %d, size: %d\n",
-				PTR_ERR(g_adspsleepmon.dsppm_stats), size);
+	if (IS_ERR_OR_NULL(g_adspsleepmon.dsppm_stats)) {
+		pr_err("Failed to get DSPPM stats from SMEM for ADSP: %d\n",
+				PTR_ERR(g_adspsleepmon.dsppm_stats));
 		return -ENOMEM;
 	}
 
@@ -473,7 +470,7 @@ static int adspsleepmon_driver_probe(struct platform_device *pdev)
 static int current_audio_pid(struct dsppm_stats *curr_dsppm_stats)
 {
 	int i;
-	int curr_pid_audio = 0, audio_pid_active = 0;
+	int curr_pid_audio, audio_pid_active = 0;
 
 	for (i = 0; i < ADSPSLEEPMON_DSPPMSTATS_NUMPD; i++) {
 
@@ -541,20 +538,19 @@ static int adspsleepmon_worker(void *data)
 
 			curr_timestamp = __arch_counter_get_cntvct();
 
-			if (curr_timestamp >= g_adspsleepmon.backup_lpm_timestamp)
-				elapsed_time = (curr_timestamp -
-					 g_adspsleepmon.backup_lpm_timestamp);
-			else
-				elapsed_time = U64_MAX -
-					g_adspsleepmon.backup_lpm_timestamp +
-					curr_timestamp;
-
 			if (!g_adspsleepmon.timer_event && g_adspsleepmon.suspend_event) {
 				/*
 				 * Check if we have elapsed enough duration
 				 * to make a decision if it is not timer
 				 * event
 				 */
+				if (curr_timestamp >= g_adspsleepmon.backup_lpm_timestamp)
+					elapsed_time = (curr_timestamp -
+						 g_adspsleepmon.backup_lpm_timestamp);
+				else
+					elapsed_time = U64_MAX -
+						g_adspsleepmon.backup_lpm_timestamp +
+						curr_timestamp;
 
 				if (elapsed_time <
 					(g_adspsleepmon.lpm_wait_time *

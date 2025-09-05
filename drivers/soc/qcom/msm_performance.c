@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/init.h>
@@ -58,6 +58,7 @@ uint32_t gfx_data[GPLAF_ELEM_SIZE] = {0};
 
 static DEFINE_PER_CPU(bool, cpu_is_hp);
 static DEFINE_MUTEX(perfevent_lock);
+static DEFINE_MUTEX(freq_pmqos_lock);
 
 enum event_idx {
 	INST_EVENT,
@@ -473,15 +474,18 @@ static ssize_t set_cpu_min_freq(struct kobject *kobj,
 	struct freq_qos_request *req;
 	int ret = 0;
 
+	mutex_lock(&freq_pmqos_lock);
 	if (!ready_for_freq_updates) {
 		ret = freq_qos_request_init();
 		if (ret) {
 			pr_err("%s: Failed to init qos requests policy for ret=%d\n",
 				__func__, ret);
+			mutex_unlock(&freq_pmqos_lock);
 			return ret;
 		}
 		ready_for_freq_updates = true;
 	}
+	mutex_unlock(&freq_pmqos_lock);
 
 	while ((cp = strpbrk(cp + 1, " :")))
 		ntokens++;
@@ -562,15 +566,18 @@ static ssize_t set_cpu_max_freq(struct kobject *kobj,
 	struct freq_qos_request *req;
 	int ret = 0;
 
+	mutex_lock(&freq_pmqos_lock);
 	if (!ready_for_freq_updates) {
 		ret = freq_qos_request_init();
 		if (ret) {
 			pr_err("%s: Failed to init qos requests policy for ret=%d\n",
 				__func__, ret);
+			mutex_unlock(&freq_pmqos_lock);
 			return ret;
 		}
 		ready_for_freq_updates = true;
 	}
+	mutex_unlock(&freq_pmqos_lock);
 
 	while ((cp = strpbrk(cp + 1, " :")))
 		ntokens++;
@@ -1725,7 +1732,7 @@ static int init_lplh_notif(const char *buf)
 		return -EINVAL;
 	cp = buf;
 	if (sscanf(cp, INIT ":%hu", &nClusters)) {
-		if (!nClusters || nClusters > LPLH_CLUSTER_MAX_CNT)
+		if (!nClusters)
 			return -EINVAL;
 
 		*ptmp++ = nClusters;
@@ -1765,7 +1772,7 @@ static int init_lplh_notif(const char *buf)
 				while ((cp1 = strpbrk(cp1 + 1, ",")))
 					nValues++;
 
-				if (nValues % 2 != 0 || LPLH_IPC_FREQ_VTBL_MAX_CNT < nValues/2)
+				if (nValues % 2 != 0)
 					return -EINVAL;
 
 				*ptmp++ = nValues/2;

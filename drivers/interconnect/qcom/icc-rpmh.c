@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -11,7 +10,6 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/slab.h>
-#include <soc/qcom/socinfo.h>
 
 #include "bcm-voter.h"
 #include "icc-debug.h"
@@ -29,10 +27,8 @@ void qcom_icc_pre_aggregate(struct icc_node *node)
 {
 	size_t i;
 	struct qcom_icc_node *qn;
-	struct qcom_icc_provider *qp;
 
 	qn = node->data;
-	qp = to_qcom_provider(node->provider);
 
 	for (i = 0; i < QCOM_ICC_NUM_BUCKETS; i++) {
 		qn->sum_avg[i] = 0;
@@ -40,9 +36,6 @@ void qcom_icc_pre_aggregate(struct icc_node *node)
 		qn->perf_mode[i] = false;
 	}
 
-	for (i = 0; i < qn->num_bcms; i++)
-		qcom_icc_bcm_voter_add(qp->voters[qn->bcms[i]->voter_idx],
-				       qn->bcms[i]);
 }
 EXPORT_SYMBOL_GPL(qcom_icc_pre_aggregate);
 
@@ -60,8 +53,10 @@ int qcom_icc_aggregate(struct icc_node *node, u32 tag, u32 avg_bw,
 {
 	size_t i;
 	struct qcom_icc_node *qn;
+	struct qcom_icc_provider *qp;
 
 	qn = node->data;
+	qp = to_qcom_provider(node->provider);
 
 	if (!tag)
 		tag = QCOM_ICC_TAG_ALWAYS;
@@ -82,6 +77,10 @@ int qcom_icc_aggregate(struct icc_node *node, u32 tag, u32 avg_bw,
 
 	*agg_avg += avg_bw;
 	*agg_peak = max_t(u32, *agg_peak, peak_bw);
+
+	for (i = 0; i < qn->num_bcms; i++)
+		qcom_icc_bcm_voter_add(qp->voters[qn->bcms[i]->voter_idx],
+				       qn->bcms[i]);
 
 	return 0;
 }
@@ -193,7 +192,7 @@ int qcom_icc_bcm_init(struct qcom_icc_bcm *bcm, struct device *dev)
 	int i;
 
 	/* BCM is already initialised*/
-	if (bcm->disabled || bcm->addr)
+	if (bcm->addr)
 		return 0;
 
 	bcm->addr = cmd_db_read_addr(bcm->name);
@@ -320,57 +319,6 @@ static struct regmap *qcom_icc_rpmh_map(struct platform_device *pdev,
 	return devm_regmap_init_mmio(dev, base, desc->config);
 }
 
-static bool is_voter_disabled(char *voter)
-{
-	if ((!strcmp(voter, "disp") && socinfo_get_part_info(PART_DISPLAY)) ||
-	    (!strcmp(voter, "disp2") && socinfo_get_part_info(PART_DISPLAY1)) ||
-	    (strnstr(voter, "cam", strlen(voter)) && socinfo_get_part_info(PART_CAMERA)))
-		return true;
-
-	return false;
-}
-
-static int qcom_icc_init_disabled_parts(struct qcom_icc_provider *qp)
-{
-	struct qcom_icc_bcm *bcm;
-	struct qcom_icc_node **qnodes, *qn;
-	const struct qcom_icc_desc *desc;
-	int voter_idx, i, j;
-	char *voter_name;
-
-	desc = of_device_get_match_data(qp->dev);
-	if (!desc)
-		return -EINVAL;
-
-	for (i = 0; i < qp->num_bcms; i++) {
-		bcm = qp->bcms[i];
-		voter_idx = bcm->voter_idx;
-		voter_name = desc->voters[voter_idx];
-
-		/* Disable BCMs incase of NO display or No Camera */
-		if (is_voter_disabled(voter_name)) {
-			bcm->disabled = true;
-			qnodes = desc->nodes;
-
-			for (j = 0; j < desc->num_nodes; j++) {
-				qn = qnodes[j];
-				if (!qn)
-					continue;
-
-				/*
-				 * Find the ICC node to be disabled by comparing voter_name in
-				 * node name string, adjust the start position accordingly
-				 */
-				if (!strcmp(qn->name + (strlen(qn->name) - strlen(voter_name)),
-					    voter_name))
-					qn->disabled = true;
-			}
-		}
-	}
-
-	return 0;
-}
-
 int qcom_icc_rpmh_probe(struct platform_device *pdev)
 {
 	const struct qcom_icc_desc *desc;
@@ -418,16 +366,10 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 	if (!qp->voters)
 		return -ENOMEM;
 
-	ret = qcom_icc_init_disabled_parts(qp);
-	if (ret)
-		return ret;
-
 	for (i = 0; i < qp->num_voters; i++) {
-		if (desc->voters[i] && !is_voter_disabled(desc->voters[i])) {
-			qp->voters[i] = of_bcm_voter_get(qp->dev, desc->voters[i]);
-			if (IS_ERR(qp->voters[i]))
-				return PTR_ERR(qp->voters[i]);
-		}
+		qp->voters[i] = of_bcm_voter_get(qp->dev, desc->voters[i]);
+		if (IS_ERR(qp->voters[i]))
+			return PTR_ERR(qp->voters[i]);
 	}
 
 	qp->regmap = qcom_icc_rpmh_map(pdev, desc);
@@ -454,7 +396,7 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 	for (i = 0; i < num_nodes; i++) {
 		size_t j;
 
-		if (!qnodes[i] || qnodes[i]->disabled)
+		if (!qnodes[i])
 			continue;
 
 		qnodes[i]->regmap = dev_get_regmap(qp->dev, NULL);

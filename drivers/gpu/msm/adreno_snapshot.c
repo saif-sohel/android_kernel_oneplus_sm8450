@@ -266,12 +266,16 @@ void adreno_parse_ib_lpac(struct kgsl_device *device,
 
 }
 
-void adreno_snapshot_dump_all_ibs(struct kgsl_device *device,
-			unsigned int *rbptr, struct kgsl_snapshot *snapshot)
+static void dump_all_ibs(struct kgsl_device *device,
+			struct adreno_ringbuffer *rb,
+			struct kgsl_snapshot *snapshot)
 {
 	int index = 0;
+	unsigned int *rbptr;
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	struct kgsl_iommu *iommu = KGSL_IOMMU(device);
+
+	rbptr = rb->buffer_desc->hostptr;
 
 	for (index = 0; index < KGSL_RB_DWORDS;) {
 
@@ -330,23 +334,13 @@ static void snapshot_rb_ibs(struct kgsl_device *device,
 	if (device->snapshot_atomic)
 		return;
 
-	rbptr = rb->buffer_desc->hostptr;
-	/*
-	 * KGSL tries to dump the active IB first. If it is not present, then
-	 * only it dumps all the IBs. In few cases, non-active IBs may help to
-	 * establish the flow and understand the hardware state better.
-	 */
-	if (device->dump_all_ibs) {
-		adreno_snapshot_dump_all_ibs(device, rbptr, snapshot);
-		return;
-	}
-
 	/*
 	 * Figure out the window of ringbuffer data to dump.  First we need to
 	 * find where the last processed IB ws submitted.  Start walking back
 	 * from the rptr
 	 */
 	index = rptr;
+	rbptr = rb->buffer_desc->hostptr;
 
 	do {
 		index--;
@@ -399,7 +393,7 @@ static void snapshot_rb_ibs(struct kgsl_device *device,
 	 */
 
 	if (index == rb->wptr) {
-		adreno_snapshot_dump_all_ibs(device, rb->buffer_desc->hostptr, snapshot);
+		dump_all_ibs(device, rb, snapshot);
 		return;
 	}
 
@@ -858,13 +852,7 @@ static struct kgsl_process_private *setup_fault_process(struct kgsl_device *devi
 
 	/* if we have an input process, make sure the ptbases match */
 	if (process) {
-		int asid = kgsl_mmu_pagetable_get_asid(process->pagetable, context);
-
 		proc_ptbase = kgsl_mmu_pagetable_get_ttbr0(process->pagetable);
-
-		if (asid >= 0)
-			proc_ptbase |= FIELD_PREP(GENMASK_ULL(63, KGSL_IOMMU_ASID_START_BIT), asid);
-
 		/* agreement! No need to check further */
 		if (hw_ptbase == proc_ptbase)
 			goto done;
@@ -885,7 +873,7 @@ static struct kgsl_process_private *setup_fault_process(struct kgsl_device *devi
 			u64 pt_ttbr0;
 
 			pt_ttbr0 = kgsl_mmu_pagetable_get_ttbr0(tmp->pagetable);
-			if ((pt_ttbr0 == MMU_SW_PT_BASE(hw_ptbase))
+			if ((pt_ttbr0 == hw_ptbase)
 			    && kgsl_process_private_get(tmp)) {
 				process = tmp;
 				break;
@@ -1295,10 +1283,7 @@ size_t adreno_snapshot_registers_v2(struct kgsl_device *device, u8 *buf,
 			*data++ = cnt;
 		}
 		for (k = ptr[0]; k <= ptr[1]; k++) {
-			if (adreno_is_cx_dbgc_register(device, k))
-				adreno_cx_dbgc_regread(device, k, data);
-			else
-				kgsl_regread(device, k, data);
+			kgsl_regread(device, k, data);
 			data++;
 		}
 	}

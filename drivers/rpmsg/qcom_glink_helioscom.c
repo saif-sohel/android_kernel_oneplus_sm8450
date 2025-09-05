@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
  * Copyright (c) 2016-2017, Linaro Ltd
  *
@@ -230,7 +230,6 @@ enum {
  * @intent_req_lock: Synchronises multiple intent requests
  * @intent_req_result: Result of intent request
  * @intent_req_comp: Completion for intent_req signalling
- * @remote_close: Tracks remote initiated close request
  */
 struct glink_helioscom_channel {
 	struct rpmsg_endpoint ept;
@@ -256,18 +255,12 @@ struct glink_helioscom_channel {
 	struct completion open_ack;
 	struct completion open_req;
 
-	struct completion close_ack;
-
 	struct mutex intent_req_lock;
 	bool intent_req_result;
 	bool channel_ready;
 
-	atomic_t intent_req_acked;
-	atomic_t intent_req_completed;
-	wait_queue_head_t intent_req_ack;
-	wait_queue_head_t intent_req_comp;
-
-	bool remote_close;
+	struct completion intent_req_comp;
+	struct completion intent_alloc_comp;
 };
 
 struct rx_pkt {
@@ -322,17 +315,11 @@ glink_helioscom_alloc_channel(struct glink_helioscom *glink, const char *name)
 
 	channel->glink = glink;
 	channel->name = kstrdup(name, GFP_KERNEL);
-	channel->remote_close = false;
 
 	init_completion(&channel->open_req);
 	init_completion(&channel->open_ack);
-
-	init_completion(&channel->close_ack);
-
-	atomic_set(&channel->intent_req_acked, 0);
-	atomic_set(&channel->intent_req_completed, 0);
-	init_waitqueue_head(&channel->intent_req_ack);
-	init_waitqueue_head(&channel->intent_req_comp);
+	init_completion(&channel->intent_req_comp);
+	init_completion(&channel->intent_alloc_comp);
 
 	idr_init(&channel->liids);
 	idr_init(&channel->riids);
@@ -351,11 +338,8 @@ static void glink_helioscom_channel_release(struct kref *ref)
 	CH_INFO(channel, "\n");
 
 	channel->intent_req_result = false;
-
-	atomic_inc(&channel->intent_req_acked);
-	wake_up(&channel->intent_req_ack);
-	atomic_inc(&channel->intent_req_completed);
-	wake_up(&channel->intent_req_comp);
+	complete(&channel->intent_req_comp);
+	complete(&channel->intent_alloc_comp);
 
 	mutex_lock(&channel->intent_lock);
 	idr_for_each_entry(&channel->liids, tmp, iid) {
@@ -494,10 +478,10 @@ static void glink_helioscom_tx_write(struct glink_helioscom *glink,
 	}
 }
 
-static int glink_helioscom_send_read_notify(struct glink_helioscom *glink)
+static void glink_helioscom_send_read_notify(struct glink_helioscom *glink)
 {
 	struct glink_helioscom_msg msg = { 0 };
-	int ret = 0;
+	int ret;
 
 	msg.cmd = cpu_to_le16(HELIOSCOM_CMD_READ_NOTIF);
 	msg.param1 = 0;
@@ -505,32 +489,21 @@ static int glink_helioscom_send_read_notify(struct glink_helioscom *glink)
 
 	GLINK_INFO(glink, "Cmd size in words = %d\n", sizeof(msg)/WORD_SIZE);
 
-	do {
-		ret = helioscom_fifo_write(glink->helioscom_handle, sizeof(msg)/WORD_SIZE,
-									&msg);
-		if (ret < 0) {
-			if (ret == -ECANCELED)
-				usleep_range(TX_WAIT_US, TX_WAIT_US + 1000);
-		}
-	} while (ret == -ECANCELED);
-
+	ret = helioscom_fifo_write(glink->helioscom_handle, sizeof(msg)/WORD_SIZE,
+								&msg);
 	if (ret < 0) {
-		GLINK_ERR(glink, "%s: Error %d writing data\n", __func__, ret);
-		return ret;
+		GLINK_ERR(glink, "%s: Error %d writing data\n",
+							__func__, ret);
+		return;
 	}
 
 	glink_helioscom_update_tx_avail(glink, sizeof(msg)/WORD_SIZE);
-
-	return ret;
 }
 
 static int glink_helioscom_tx(struct glink_helioscom *glink, void *data,
 						size_t dlen, bool wait)
 {
 	int ret = 0;
-
-	if (atomic_read(&glink->in_reset))
-		return -ENXIO;
 
 	mutex_lock(&glink->tx_lock);
 
@@ -547,13 +520,7 @@ static int glink_helioscom_tx(struct glink_helioscom *glink, void *data,
 
 		if (!glink->sent_read_notify) {
 			glink->sent_read_notify = true;
-			ret = glink_helioscom_send_read_notify(glink);
-			if (ret < 0) {
-				glink->sent_read_notify = false;
-				if (ret == -EBUSY)
-					ret = -ENXIO;
-				goto out;
-			}
+			glink_helioscom_send_read_notify(glink);
 		}
 		/* Wait without holding the tx_lock */
 		mutex_unlock(&glink->tx_lock);
@@ -561,15 +528,16 @@ static int glink_helioscom_tx(struct glink_helioscom *glink, void *data,
 		usleep_range(TX_WAIT_US, TX_WAIT_US + 50);
 
 		mutex_lock(&glink->tx_lock);
-	}
 
-	if (glink->sent_read_notify)
-		glink->sent_read_notify = false;
+		if (glink_helioscom_tx_avail(glink) >= dlen/WORD_SIZE)
+			glink->sent_read_notify = false;
+	}
 
 	glink_helioscom_tx_write(glink, data, dlen);
 
 out:
 	mutex_unlock(&glink->tx_lock);
+
 	return ret;
 }
 
@@ -612,10 +580,7 @@ static void glink_helioscom_handle_intent_req_ack(struct glink_helioscom *glink,
 	}
 
 	channel->intent_req_result = granted;
-
-	atomic_inc(&channel->intent_req_acked);
-	wake_up(&channel->intent_req_ack);
-
+	complete(&channel->intent_req_comp);
 	CH_INFO(channel, "\n");
 }
 
@@ -707,8 +672,8 @@ static int glink_helioscom_request_intent(struct glink_helioscom *glink,
 	kref_get(&channel->refcount);
 	mutex_lock(&channel->intent_req_lock);
 
-	atomic_set(&channel->intent_req_acked, 0);
-	atomic_set(&channel->intent_req_completed, 0);
+	reinit_completion(&channel->intent_req_comp);
+	reinit_completion(&channel->intent_alloc_comp);
 
 	req.cmd = cpu_to_le16(HELIOSCOM_CMD_RX_INTENT_REQ);
 	req.param1 = cpu_to_le16(channel->lcid);
@@ -720,17 +685,10 @@ static int glink_helioscom_request_intent(struct glink_helioscom *glink,
 	if (ret)
 		goto unlock;
 
-	ret = wait_event_timeout(channel->intent_req_ack,
-				 atomic_read(&channel->intent_req_acked) ||
-				 atomic_read(&glink->in_reset), 10 * HZ);
+	ret = wait_for_completion_timeout(&channel->intent_req_comp, 10 * HZ);
 	if (!ret) {
 		dev_err(glink->dev, "intent request ack timed out\n");
 		ret = -ETIMEDOUT;
-	} else if (atomic_read(&glink->in_reset)) {
-		CH_INFO(channel, "ssr detected\n");
-		ret = -ECONNRESET;
-	} else {
-		ret = channel->intent_req_result ? 0 : -ECANCELED;
 	}
 
 	if (!channel->intent_req_result) {
@@ -739,6 +697,13 @@ static int glink_helioscom_request_intent(struct glink_helioscom *glink,
 		goto unlock;
 	}
 
+	ret = wait_for_completion_timeout(&channel->intent_alloc_comp, 10 * HZ);
+	if (!ret) {
+		dev_err(glink->dev, "intent request alloc timed out\n");
+		ret = -ETIMEDOUT;
+	} else {
+		ret = channel->intent_req_result ? 0 : -ECANCELED;
+	}
 unlock:
 	mutex_unlock(&channel->intent_req_lock);
 	kref_put(&channel->refcount, glink_helioscom_channel_release);
@@ -754,7 +719,6 @@ static int glink_helioscom_send_final(struct glink_helioscom_channel *channel,
 	int size = len;
 	int chunk_size = 0;
 	int left_size = 0;
-	int ret = 0;
 	void *short_data;
 	u32 command_size = 0;
 	struct {
@@ -816,19 +780,12 @@ static int glink_helioscom_send_final(struct glink_helioscom_channel *channel,
 
 		if (atomic_read(&glink->in_reset)) {
 			mutex_unlock(&glink->tx_lock);
-			return -ENXIO;
+			return -EINVAL;
 		}
 
 		if (!glink->sent_read_notify) {
 			glink->sent_read_notify = true;
-			ret = glink_helioscom_send_read_notify(glink);
-			if (ret < 0) {
-				glink->sent_read_notify = false;
-				if (ret == -EBUSY)
-					ret = -ENXIO;
-				mutex_unlock(&glink->tx_lock);
-				return ret;
-			}
+			glink_helioscom_send_read_notify(glink);
 		}
 
 		/* Wait without holding the tx_lock */
@@ -837,10 +794,10 @@ static int glink_helioscom_send_final(struct glink_helioscom_channel *channel,
 		usleep_range(TX_WAIT_US, TX_WAIT_US + 50);
 
 		mutex_lock(&glink->tx_lock);
-	}
 
-	if (glink->sent_read_notify)
-		glink->sent_read_notify = false;
+		if (glink_helioscom_tx_avail(glink) >= command_size)
+			glink->sent_read_notify = false;
+	}
 
 	if (chunk_size) {
 		helioscom_ahb_write(glink->helioscom_handle,
@@ -897,23 +854,6 @@ static int __glink_helioscom_send(struct glink_helioscom_channel *channel,
 		}
 
 		ret = glink_helioscom_request_intent(glink, channel, len);
-		if (ret < 0)
-			goto tx_exit;
-
-		/*Wait for intents to arrive*/
-		ret = wait_event_timeout(channel->intent_req_comp,
-					 atomic_read(&channel->intent_req_completed) ||
-					 atomic_read(&glink->in_reset), 10 * HZ);
-		if (!ret) {
-			dev_err(glink->dev, "intent request completion timed out\n");
-			ret = -ETIMEDOUT;
-		} else if (atomic_read(&glink->in_reset)) {
-			CH_INFO(channel, "ssr detected\n");
-			ret = -ECONNRESET;
-		} else {
-			ret = channel->intent_req_result ? 0 : -ECANCELED;
-		}
-
 		if (ret < 0)
 			goto tx_exit;
 	}
@@ -1028,26 +968,13 @@ static void glink_helioscom_send_version_ack(struct glink_helioscom *glink)
 static void glink_helioscom_send_close_req(struct glink_helioscom *glink,
 				     struct glink_helioscom_channel *channel)
 {
-	int ret;
 	struct glink_helioscom_msg req = { 0 };
 
 	req.cmd = cpu_to_le16(HELIOSCOM_CMD_CLOSE);
 	req.param1 = cpu_to_le16(channel->lcid);
 
 	CH_INFO(channel, "\n");
-
-	ret = glink_helioscom_tx(glink, &req, sizeof(req), true);
-	if (ret < 0) {
-		GLINK_ERR(glink, "transmit error:%d\n", ret);
-		return;
-	}
-	if (!channel->remote_close) {
-		ret = wait_for_completion_timeout(&channel->close_ack, 2 * HZ);
-		if (!ret) {
-			GLINK_ERR(glink, "rx_close_ack timedout[%d]:[%d]\n",
-					channel->rcid, channel->lcid);
-		}
-	}
+	glink_helioscom_tx(glink, &req, sizeof(req), true);
 }
 
 /**
@@ -1329,8 +1256,6 @@ static void glink_helioscom_destroy_ept(struct rpmsg_endpoint *ept)
 	struct glink_helioscom *glink = channel->glink;
 	unsigned long flags;
 
-	CH_INFO(channel, "\n");
-
 	spin_lock_irqsave(&channel->recv_lock, flags);
 	if (!channel->ept.cb) {
 		spin_unlock_irqrestore(&channel->recv_lock, flags);
@@ -1364,7 +1289,6 @@ static void glink_helioscom_rx_close(struct glink_helioscom *glink, unsigned int
 	mutex_unlock(&glink->idr_lock);
 	if (WARN(!channel, "close request on unknown channel\n"))
 		return;
-	channel->remote_close = true;
 	CH_INFO(channel, "\n");
 
 	/* Decouple the potential rpdev from the channel */
@@ -1413,7 +1337,6 @@ static void glink_helioscom_rx_close_ack(struct glink_helioscom *glink,
 
 		rpmsg_unregister_device(glink->dev, &chinfo);
 	}
-	complete_all(&channel->close_ack);
 	channel->rpdev = NULL;
 
 	kref_put(&channel->refcount, glink_helioscom_channel_release);
@@ -1557,7 +1480,6 @@ static int glink_helioscom_rx_open(struct glink_helioscom *glink, unsigned int r
 		create_device = true;
 	}
 
-	CH_INFO(channel, "start\n");
 	mutex_lock(&glink->idr_lock);
 	ret = idr_alloc(&glink->rcids, channel, rcid, rcid + 1, GFP_ATOMIC);
 	if (ret < 0) {
@@ -1594,7 +1516,7 @@ static int glink_helioscom_rx_open(struct glink_helioscom *glink, unsigned int r
 
 		channel->rpdev = rpdev;
 	}
-	CH_INFO(channel, "end\n");
+	CH_INFO(channel, "\n");
 
 	return 0;
 
@@ -1800,18 +1722,9 @@ static int glink_helioscom_rx_data(struct glink_helioscom *glink,
 
 	if (intent->size - intent->offset < chunk_size) {
 		dev_err(glink->dev, "Insufficient space in intent\n");
-		glink_helioscom_free_intent(channel, intent);
 		mutex_unlock(&channel->intent_lock);
 
 		/* The packet header lied, drop payload */
-		return msglen;
-	}
-
-	if (chunk_size % WORD_SIZE) {
-		dev_err(glink->dev, "For chunk_size %d use short packet\n",
-						chunk_size);
-		glink_helioscom_free_intent(channel, intent);
-		mutex_unlock(&channel->intent_lock);
 		return msglen;
 	}
 
@@ -1971,9 +1884,7 @@ static int glink_helioscom_handle_intent(struct glink_helioscom *glink,
 			dev_err(glink->dev, "failed to store remote intent\n");
 	}
 
-	atomic_inc(&channel->intent_req_completed);
-	wake_up(&channel->intent_req_comp);
-
+	complete(&channel->intent_alloc_comp);
 	return msglen;
 }
 
@@ -2012,7 +1923,7 @@ static void glink_helioscom_handle_rx_done(struct glink_helioscom *glink,
 	mutex_unlock(&channel->intent_lock);
 }
 
-static int glink_helioscom_process_cmd(struct glink_helioscom *glink, void *rx_data,
+static void glink_helioscom_process_cmd(struct glink_helioscom *glink, void *rx_data,
 				  u32 rx_size)
 {
 	struct glink_helioscom_msg *msg;
@@ -2021,18 +1932,12 @@ static int glink_helioscom_process_cmd(struct glink_helioscom *glink, void *rx_d
 	unsigned int param3;
 	unsigned int param4;
 	unsigned int cmd;
-	u32 offset = 0;
-	int ret = 0;
+	int offset = 0;
+	int ret;
 	u16 name_len;
 	char *name;
 
 	while (offset < rx_size) {
-		if (rx_size - offset < sizeof(struct glink_helioscom_msg)) {
-			ret = -EBADMSG;
-			GLINK_ERR(glink, "%s: Error %d process cmd\n", __func__, ret);
-			return ret;
-		}
-
 		msg = (struct glink_helioscom_msg *)(rx_data + offset);
 		offset += sizeof(*msg);
 
@@ -2115,7 +2020,6 @@ static int glink_helioscom_process_cmd(struct glink_helioscom *glink, void *rx_d
 			break;
 		}
 	}
-	return ret;
 }
 
 /**
@@ -2200,11 +2104,7 @@ static int glink_helioscom_cleanup(struct glink_helioscom *glink)
 	/* Release any defunct local channels, waiting for close-ack */
 	idr_for_each_entry(&glink->lcids, channel, cid) {
 		/* Wakeup threads waiting for intent*/
-		complete(&channel->close_ack);
-
-		atomic_inc(&channel->intent_req_acked);
-		wake_up(&channel->intent_req_ack);
-
+		complete(&channel->intent_req_comp);
 		kref_put(&channel->refcount, glink_helioscom_channel_release);
 		idr_remove(&glink->lcids, cid);
 	}
@@ -2363,6 +2263,7 @@ int glink_helioscom_probe(struct platform_device *pdev)
 	dev = glink->dev;
 	dev->of_node = pdev->dev.of_node;
 	dev->release = glink_helioscom_release;
+	dev_set_name(dev, "%s", dev->of_node->name);
 	dev_set_drvdata(dev, glink);
 
 	ret = of_property_read_string(dev->of_node, "label", &glink->name);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/slab.h>
@@ -10,7 +10,6 @@
 #include "adreno.h"
 #include "adreno_sysfs.h"
 #include "adreno_trace.h"
-#include "kgsl_bus.h"
 #include "kgsl_eventlog.h"
 #include "kgsl_gmu_core.h"
 #include "kgsl_timeline.h"
@@ -249,10 +248,8 @@ static void _retire_timestamp(struct kgsl_drawobj *drawobj)
 				context->id, drawobj->timestamp,
 				!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 
-	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
+	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME)
 		atomic64_inc(&context->proc_priv->frame_count);
-		atomic_inc(&context->proc_priv->period->frames);
-	}
 
 	/*
 	 * For A3xx we still get the rptr from the CP_RB_RPTR instead of
@@ -540,32 +537,6 @@ static int dispatcher_queue_context(struct adreno_device *adreno_dev,
 	return 0;
 }
 
-/*
- * Real time clients may demand high BW and have strict latency requirement.
- * GPU bus DCVS is not fast enough to account for sudden BW requirements.
- * Bus hint helps to bump up the bus vote (IB) upfront for known time-critical
- * workloads.
- */
-static void process_rt_bus_hint(struct kgsl_device *device, bool on)
-{
-	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	struct adreno_dispatcher_drawqueue *drawqueue =
-			DRAWQUEUE(&adreno_dev->ringbuffers[0]);
-
-	if (!adreno_is_preemption_enabled(adreno_dev) ||
-		!device->pwrctrl.rt_bus_hint)
-		return;
-
-	if (device->pwrctrl.rt_bus_hint_active == on)
-		return;
-
-	if (on && drawqueue->inflight == 1)
-		kgsl_bus_update(device, KGSL_BUS_VOTE_RT_HINT_ON);
-
-	if (!on && drawqueue->inflight == 0)
-		kgsl_bus_update(device, KGSL_BUS_VOTE_RT_HINT_OFF);
-}
-
 #define ADRENO_DRAWOBJ_PROFILE_COUNT \
 	(PAGE_SIZE / sizeof(struct adreno_drawobj_profile_entry))
 
@@ -625,8 +596,6 @@ static int sendcmd(struct adreno_device *adreno_dev,
 			ADRENO_DRAWOBJ_PROFILE_COUNT;
 	}
 
-	process_rt_bus_hint(device, true);
-
 	ret = adreno_ringbuffer_submitcmd(adreno_dev, cmdobj, &time);
 
 	/*
@@ -658,8 +627,6 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	if (ret) {
 		dispatcher->inflight--;
 		dispatch_q->inflight--;
-
-		process_rt_bus_hint(device, false);
 
 		mutex_unlock(&device->mutex);
 
@@ -965,7 +932,6 @@ static void _dispatcher_update_timers(struct adreno_device *adreno_dev)
 	/* Kick the idle timer */
 	mutex_lock(&device->mutex);
 	kgsl_pwrscale_update(device);
-	process_rt_bus_hint(device, false);
 	kgsl_start_idle_timer(device);
 	mutex_unlock(&device->mutex);
 
@@ -992,6 +958,7 @@ static inline void _decrement_submit_now(struct kgsl_device *device)
  *
  * Lock the dispatcher and call _adreno_dispatcher_issueibcmds
  */
+#ifndef OPLUS_FEATURE_DISPLAY
 static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 {
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
@@ -1023,6 +990,7 @@ static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 done:
 	adreno_dispatcher_schedule(device);
 }
+#endif /* OPLUS_FEATURE_DISPLAY */
 
 /**
  * get_timestamp() - Return the next timestamp for the context
@@ -1434,7 +1402,11 @@ static int adreno_dispatcher_queue_cmds(struct kgsl_device_private *dev_priv,
 	 */
 
 	if (dispatch_q->inflight < _context_drawobj_burst)
+#ifdef OPLUS_FEATURE_DISPLAY
+		adreno_dispatcher_schedule(&(adreno_dev->dev));
+#else
 		adreno_dispatcher_issuecmds(adreno_dev);
+#endif /*OPLUS_FEATURE_DISPLAY*/
 done:
 	if (test_and_clear_bit(ADRENO_CONTEXT_FAULT, &context->priv))
 		return -EPROTO;
@@ -1971,12 +1943,7 @@ static void do_header_and_snapshot(struct kgsl_device *device, int fault,
 	/* Always dump the snapshot on a non-drawobj failure */
 	if (cmdobj == NULL) {
 		adreno_fault_header(device, rb, NULL, fault);
-
-		/* GMU snapshot will also pull a full device snapshot */
-		if (fault & ADRENO_GMU_FAULT)
-			gmu_core_fault_snapshot(device);
-		else
-			kgsl_device_snapshot(device, NULL, NULL, false);
+		kgsl_device_snapshot(device, NULL, NULL, fault & ADRENO_GMU_FAULT);
 		return;
 	}
 
@@ -2070,6 +2037,11 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 		adreno_readreg64(adreno_dev, ADRENO_REG_CP_RB_BASE,
 			ADRENO_REG_CP_RB_BASE_HI, &base);
 
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2021/07/26, add for oplus gpu mini dump
+	device->snapshotfault = fault;
+#endif
+
 	/*
 	 * Force the CP off for anything but a hard fault to make sure it is
 	 * good and stopped
@@ -2125,9 +2097,6 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 
 	/* Reset the dispatcher queue */
 	dispatcher->inflight = 0;
-
-	/* Remove the bus hint */
-	device->pwrctrl.rt_bus_hint_active = false;
 
 	/* Reset the GPU and make sure halt is not set during recovery */
 	halt = adreno_gpu_halt(adreno_dev);
@@ -2218,8 +2187,7 @@ static void _print_recovery(struct kgsl_device *device,
 }
 
 static void cmdobj_profile_ticks(struct adreno_device *adreno_dev,
-	struct kgsl_drawobj_cmd *cmdobj, uint64_t *start, uint64_t *retire,
-	uint64_t *active)
+	struct kgsl_drawobj_cmd *cmdobj, uint64_t *start, uint64_t *retire)
 {
 	void *ptr = adreno_dev->profile_buffer->hostptr;
 	struct adreno_drawobj_profile_entry *entry;
@@ -2231,10 +2199,6 @@ static void cmdobj_profile_ticks(struct adreno_device *adreno_dev,
 	rmb();
 	*start = entry->started;
 	*retire = entry->retired;
-	if (ADRENO_GPUREV(adreno_dev) < 600)
-		*active = entry->retired - entry->started;
-	else
-		*active = entry->ctx_end - entry->ctx_start;
 }
 
 static void retire_cmdobj(struct adreno_device *adreno_dev,
@@ -2245,7 +2209,7 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	struct adreno_context *drawctxt = ADRENO_CONTEXT(drawobj->context);
 	struct adreno_ringbuffer *rb = drawctxt->rb;
 	struct kgsl_context *context = drawobj->context;
-	uint64_t start = 0, end = 0, active = 0;
+	uint64_t start = 0, end = 0;
 	struct retire_info info = {0};
 
 	if (cmdobj->fault_recovery != 0) {
@@ -2254,7 +2218,7 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	}
 
 	if (test_bit(CMDOBJ_PROFILE, &cmdobj->priv))
-		cmdobj_profile_ticks(adreno_dev, cmdobj, &start, &end, &active);
+		cmdobj_profile_ticks(adreno_dev, cmdobj, &start, &end);
 
 	info.inflight = (int)dispatcher->inflight;
 	info.rb_id = rb->id;
@@ -2262,22 +2226,14 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	info.timestamp = drawobj->timestamp;
 	info.sop = start;
 	info.eop = end;
-	info.active = active;
-
-	/* protected GPU work must not be reported */
-	if  (!(context->flags & KGSL_CONTEXT_SECURE))
-		kgsl_work_period_update(KGSL_DEVICE(adreno_dev),
-					     context->proc_priv->period, active);
 
 	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_RETIRED,
 			       pid_nr(context->proc_priv->pid),
 			       context->id, drawobj->timestamp,
 			       !!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 
-	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
+	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME)
 		atomic64_inc(&context->proc_priv->frame_count);
-		atomic_inc(&context->proc_priv->period->frames);
-	}
 
 	/*
 	 * For A3xx we still get the rptr from the CP_RB_RPTR instead of
@@ -2417,7 +2373,6 @@ static void _dispatcher_power_down(struct adreno_device *adreno_dev)
 		complete_all(&dispatcher->idle_gate);
 
 	adreno_dispatcher_stop_fault_timer(device);
-	process_rt_bus_hint(device, false);
 
 	if (test_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv)) {
 		adreno_active_count_put(adreno_dev);
